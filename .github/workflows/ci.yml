@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  native:
+    name: Native (test + clippy + fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (native crates)
+        run: cargo clippy --workspace --exclude lokalize --all-targets --locked -- -D warnings
+      - name: cargo test (native crates)
+        run: cargo test --workspace --exclude lokalize --locked
+
+  wasm:
+    name: WASM extension build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: cargo build (wasm32-wasip2)
+        run: cargo build -p lokalize --target wasm32-wasip2 --release --locked

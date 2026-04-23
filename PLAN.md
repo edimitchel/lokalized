@@ -43,18 +43,18 @@ lokalize-vue/
 
 ## Phase 0 — Scaffolding (≈ 1-2 j)
 
-- [ ] `extension.toml` (schema_version 1, id `lokalize`, language_server rattaché)
-- [ ] Workspace `Cargo.toml` (resolver 2, 4 membres)
-- [ ] `crates/zed-extension` : `crate-type = ["cdylib"]`, `zed_extension_api = "0.7"`,
-      impl stub de `Extension` avec `language_server_command`
-- [ ] `crates/i18n-core` : lib stub avec modules `parser`, `index`, `framework`, `locale`
-- [ ] `crates/lsp-server` : tower-lsp répondant à `initialize`, log via `tracing`
-- [ ] `crates/mcp-server` : stub rmcp exposant un seul outil `i18n.list_keys` (trivial)
-- [ ] CI GitHub Actions : matrix 6 cibles (linux/macos/windows × x64/arm64),
-      `cargo test`, `cargo clippy -D warnings`, upload artefacts
-- [ ] Workflow `release.yml` déclenché par tag `v*`, attache les binaires à la release
-- [ ] README initial (install dev, architecture, licence MIT)
-- [ ] Premier commit installable via `zed: install dev extension`
+- [x] `extension.toml` (schema_version 1, id `lokalize`, language_server rattaché)
+- [x] Workspace `Cargo.toml` (resolver 2, 4 membres, `default-members = ["."]`)
+- [x] WASM extension au root : `crate-type = ["cdylib"]`, `zed_extension_api = "0.7"`,
+      impl de `Extension` avec `language_server_command` (résolution `LOKALIZE_LSP_PATH` → `which`)
+- [x] `crates/i18n-core` : lib avec modules `parser`, `index`, `framework`, `locale`
+- [x] `crates/lsp-server` : tower-lsp répondant à `initialize/initialized/shutdown`, tracing `LOKALIZE_LOG`
+- [x] `crates/mcp-server` : binaire stub (implémentation Phase 5)
+- [x] CI GitHub Actions : `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` + build WASM
+- [x] Workflow `release.yml` déclenché par tag `v*`, matrix 5 cibles (linux x64/arm64, macos x64/arm64, windows x64)
+- [x] README initial (install dev, architecture, commandes utiles)
+- [x] Scaffold buildable : `cargo check` natif ✅, `cargo build --target wasm32-wasip2` ✅ (lokalize.wasm 166 KB)
+- [ ] Premier commit installable via `zed: install dev extension` (à tester dans Zed)
 
 ---
 

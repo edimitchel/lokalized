@@ -1,0 +1,47 @@
+[package]
+name = "lokalize"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "i18n support for Zed: inline translations, hover, go-to-def, diagnostics, and more"
+repository = "https://github.com/medighoffer/lokalize-vue"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+zed_extension_api = "0.7"
+
+[workspace]
+members = [
+    "crates/i18n-core",
+    "crates/lsp-server",
+    "crates/mcp-server",
+]
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/medighoffer/lokalize-vue"
+authors = ["medighoffer"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+tower-lsp = "0.20"
+i18n-core = { path = "crates/i18n-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

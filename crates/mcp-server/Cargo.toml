@@ -1,0 +1,15 @@
+[package]
+name = "lokalize-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MCP server exposing i18n operations to the Zed Assistant (planned for v0.3)"
+
+[[bin]]
+name = "lokalize-mcp"
+path = "src/main.rs"
+
+[dependencies]
+i18n-core.workspace = true

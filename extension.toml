@@ -1,0 +1,11 @@
+id = "lokalize"
+name = "Lokalize"
+description = "All-in-one i18n support for Zed: inline translations, hover previews, go-to-definition, diagnostics, and more. Inspired by i18n-ally."
+version = "0.0.1"
+schema_version = 1
+authors = ["medighoffer"]
+repository = "https://github.com/medighoffer/lokalize-vue"
+
+[language_servers.lokalize]
+name = "Lokalize LSP"
+languages = ["Vue", "TypeScript", "TSX", "JavaScript", "JSX", "HTML"]
