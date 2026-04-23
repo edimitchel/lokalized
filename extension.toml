@@ -8,4 +8,4 @@ repository = "https://github.com/medighoffer/lokalize-vue"
 
 [language_servers.lokalize]
 name = "Lokalize LSP"
-languages = ["Vue", "TypeScript", "TSX", "JavaScript", "JSX", "HTML"]
+languages = ["Vue.js", "TypeScript", "TSX", "JavaScript", "JSX", "HTML"]

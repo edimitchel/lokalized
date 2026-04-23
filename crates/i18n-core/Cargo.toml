@@ -11,3 +11,5 @@ description = "Core i18n logic: locale parsing, key indexing, framework detectio
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+jsonc-parser.workspace = true
+walkdir.workspace = true

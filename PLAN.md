@@ -62,27 +62,28 @@ lokalize-vue/
 
 ### Détection du projet
 
-- [ ] Scan du worktree à l'ouverture, lecture `.zed/lokalize.json`
-- [ ] Heuristiques fallback : `locales/`, `src/locales/`, `i18n/`, `public/locales/`, `lib/l10n/`
-- [ ] Détection structure : **flat** (`en.json`) vs **nested** (`en/common.json`)
-- [ ] Détection de la `sourceLocale` (défaut `en`, override par config)
+- [x] Scan du worktree à l'ouverture, lecture `.zed/lokalize.json` (`config::ProjectConfig::load`)
+- [x] Heuristiques fallback : `locales/`, `src/locales/`, `i18n/`, `public/locales/`, `lib/l10n/`, `app/locales/`, `assets/locales/`
+- [x] Détection structure : **flat** (`en.json`) vs **nested** (`en/common.json`) (`IndexBuilder::detect_layout`)
+- [x] Détection de la `sourceLocale` (défaut `en`, override par config)
 
 ### Parsers avec positions source
 
-- [ ] JSON / JSON5 (crate `jsonc-parser` ou équivalent avec spans)
-- [ ] YAML (crate `yaml-rust2` ou `serde_yaml` + extraction positions)
-- [ ] ARB (Flutter) — JSON + métadonnées `@key`
+- [x] JSON / JSONC / JSON5 / ARB (`jsonc-parser 0.32`, positions byte/line/UTF-16)
+- [x] ARB (Flutter) — JSON + métadonnées `@key` ignorées
+- [ ] YAML (crate `yaml-rust2` ou `saphyr` + extraction positions)
 - [ ] PHP arrays — parser regex/AST minimaliste
 - [ ] Parsers différés v0.2+ : PO/gettext, TOML, INI, Properties, Strings, XLIFF
 
 ### Index
 
-- [ ] `LocaleIndex` : `HashMap<Locale, KeyTree>` avec feuilles `{ value, file, range }`
-- [ ] Support clés à plat (`a.b.c`) et imbriquées
+- [x] `LocaleIndex` : `BTreeMap<Locale, KeyTree>` avec feuilles `{ value, file, range }`
+- [x] Support clés à plat (`a.b.c`) et imbriquées
+- [x] API de lookup multi-locale + `missing_keys` + `all_keys`
 - [ ] Support `linked messages` vue-i18n (`@:other.key`)
 - [ ] Index secondaire : `HashMap<Key, Vec<Location>>` pour go-to-def rapide
 
-### Watcher
+### Watcher (Phase 1.5)
 
 - [ ] `notify` crate, debounce 100 ms
 - [ ] Réindexation incrémentale par fichier modifié
@@ -90,9 +91,16 @@ lokalize-vue/
 
 ### Tests
 
-- [ ] Fixtures multi-framework (vue-i18n nested, i18next flat, Flutter ARB)
-- [ ] Tests unitaires parsers (valid + invalid + positions)
-- [ ] Test d'intégration : ouverture d'un projet type → index attendu
+- [x] Tests unitaires : 14 tests (positions, Locale, JSON parser, KeyTree, diff)
+- [x] Tests d'intégration avec fixtures : `nested_project` + `flat_project` + erreur "no locales"
+- [x] **17 tests verts** sur `cargo test -p i18n-core`
+- [ ] Fixtures multi-framework supplémentaires (vue-i18n, Flutter ARB réel)
+
+### Intégration LSP
+
+- [x] Le LSP charge `ProjectConfig` + construit `LocaleIndex` au `initialize` (async, non bloquant)
+- [x] Log structuré du résultat dans Zed log : `Lokalize: indexed N locales, M files, K keys`
+- [x] `Arc<RwLock<Option<LocaleIndex>>>` partagé, prêt pour les handlers hover/inlay/def (Phase 3)
 
 ---
 

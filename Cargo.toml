@@ -39,6 +39,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
 tower-lsp = "0.20"
+jsonc-parser = "0.32"
+walkdir = "2"
 i18n-core = { path = "crates/i18n-core" }
 
 [profile.release]
