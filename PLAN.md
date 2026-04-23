@@ -54,7 +54,7 @@ lokalize-vue/
 - [x] Workflow `release.yml` déclenché par tag `v*`, matrix 5 cibles (linux x64/arm64, macos x64/arm64, windows x64)
 - [x] README initial (install dev, architecture, commandes utiles)
 - [x] Scaffold buildable : `cargo check` natif ✅, `cargo build --target wasm32-wasip2` ✅ (lokalize.wasm 166 KB)
-- [ ] Premier commit installable via `zed: install dev extension` (à tester dans Zed)
+- [x] Premier commit installable via `zed: install dev extension` (✅ extension chargée dans Zed)
 
 ---
 
