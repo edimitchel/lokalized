@@ -106,15 +106,15 @@ lokalize-vue/
 
 ## Phase 2 — Détection des usages dans le code (≈ 2-3 j)
 
-- [ ] Port des définitions de frameworks d'i18n-ally (YAML → `include_str!`)
-- [ ] Frameworks built-in v0.1 : `vue-i18n`, `i18next`, `react-intl`, `nuxt-i18n`
-- [ ] `FrameworkRegistry` chargeant built-in + custom `.zed/i18n-ally-custom-framework.yml`
-- [ ] `KeyFinder` : match `usage_match_regex` sur le source, capture group 1 = clé
-- [ ] Résolution du `scope_range_regex` (namespace inféré depuis `useTranslation("ns")`)
-- [ ] `Vec<KeyUsage { key, range, scope, framework }>` par document
-- [ ] **Option robustesse** : tree-sitter pour Vue SFC et TSX (limiter faux positifs
-      dans commentaires/strings multi-lignes)
-- [ ] Tests : fixtures de fichiers `.vue`, `.tsx`, `.php`, `.dart` avec usages attendus
+- [x] Frameworks built-in hard-codés : `vue-i18n`, `nuxt-i18n`, `i18next`, `react-intl`
+- [x] `Framework` struct + `KeyUsage { key, range, scope, framework_id }`
+- [x] `KeyFinder` : regex avec placeholder `{key}`, capture group 1 = clé
+- [x] Patterns reconnus : `$t/$tc/$rt/t/tc/i18n.t/keypath=/useTranslation`, `<Trans i18nKey>`, `formatMessage({id})`, `<FormattedMessage id>`
+- [x] Résolution du scope (ex. `useTranslation("forms") + t("submit")` → `forms.submit`)
+- [x] Dédup multi-framework (priorité au match avec scope résolu)
+- [x] 10 tests unitaires + **27 tests verts** (lib + intégration)
+- [ ] Support custom framework via `.zed/i18n-ally-custom-framework.yml` (Phase 2.5)
+- [ ] Option robustesse : tree-sitter pour réduire les faux positifs dans commentaires/strings multi-lignes (Phase 2.5)
 
 ---
 

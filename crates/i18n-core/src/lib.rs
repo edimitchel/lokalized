@@ -11,6 +11,7 @@ pub mod parser;
 pub mod position;
 
 pub use config::{KeyStyle, ProjectConfig};
+pub use framework::{find_usages, Framework, KeyUsage, BUILTIN_FRAMEWORKS};
 pub use index::{IndexBuilder, IndexError, KeyNode, KeyTree, LocaleIndex, LocalizedValue};
 pub use locale::{Locale, LocaleFile, LocaleLayout};
 pub use parser::{parse_file, LocaleEntry, LocaleParser, ParseError};

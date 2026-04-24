@@ -41,6 +41,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "ma
 tower-lsp = "0.20"
 jsonc-parser = "0.32"
 walkdir = "2"
+regex = "1"
 i18n-core = { path = "crates/i18n-core" }
 
 [profile.release]
