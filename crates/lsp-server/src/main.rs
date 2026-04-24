@@ -12,16 +12,18 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use i18n_core::{
-    find_usages, IndexBuilder, KeyUsage, LineIndex, LocaleIndex, LocalizedValue, ProjectConfig,
+    escape_md, find_usages, truncate_chars, IndexBuilder, KeyUsage, LineIndex, LocaleIndex,
+    LocalizedValue, ParsedValue, ProjectConfig,
 };
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CompletionItem,
+    CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
     MarkupContent, MarkupKind, MessageType, OneOf, Position as LspPosition, Range as LspRange,
     ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
@@ -79,6 +81,9 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                // Provider declared but handler returns None until Phase 4
+                // wires up WorkspaceEdit-based actions.
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
                         "\"".into(),
@@ -165,10 +170,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let mut md = format!("**`{}`**\n\n", usage.key);
-        for (locale, val) in &values {
-            md.push_str(&format!("- **{locale}** — {}\n", escape_md(&val.value)));
-        }
+        let md = format_hover_markdown(&usage.key, &values, &idx.source_locale);
 
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -244,6 +246,30 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn code_action(
+        &self,
+        _params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        // Phase 4 will populate this handler with `WorkspaceEdit`-based actions
+        // (Fill missing, Extract to key, Rename). "Go to <locale>" actions
+        // were deliberately removed because Zed currently ignores
+        // `window/showDocument` for local `file://` URIs — see
+        // https://github.com/zed-industries/zed/discussions/53123. F12
+        // (goto-definition) already offers a multi-location picker and the
+        // hover popup exposes clickable file links, covering the navigation
+        // use-case via pure-LSP features that Zed does support.
+        Ok(None)
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        // No custom commands registered yet. Reserved for Phase 4.
+        warn!("unknown command: {}", params.command);
+        Ok(None)
+    }
+
     async fn completion(
         &self,
         _params: CompletionParams,
@@ -261,7 +287,7 @@ impl LanguageServer for Backend {
                 let preview = idx
                     .lookup(&key)
                     .get(source)
-                    .map(|v| truncate(&v.value, 60));
+                    .map(|v| truncate_chars(&v.value, 60));
                 CompletionItem {
                     label: key.clone(),
                     kind: Some(CompletionItemKind::TEXT),
@@ -376,32 +402,110 @@ fn localized_value_to_location(v: &LocalizedValue) -> Option<Location> {
 }
 
 fn build_inlay_hint(usage: &KeyUsage, value: &LocalizedValue) -> InlayHint {
+    let parsed = ParsedValue::parse(&value.value);
+    let preview = truncate_chars(parsed.primary_form(), 60);
+    // Surface plurality with a `…` hint so users know multiple forms exist.
+    let label = if parsed.is_plural() {
+        format!(" = {preview} …")
+    } else {
+        format!(" = {preview}")
+    };
     InlayHint {
         position: to_lsp_position(&usage.range.end),
-        label: InlayHintLabel::String(format!(" = {}", truncate(&value.value, 40))),
+        label: InlayHintLabel::String(label),
         kind: Some(InlayHintKind::PARAMETER),
         text_edits: None,
-        tooltip: None,
+        tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(
+            value.value.clone(),
+        )),
         padding_left: Some(true),
         padding_right: Some(false),
         data: None,
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let prefix: String = s.chars().take(max).collect();
-        format!("{prefix}…")
-    }
-}
+/// Render the hover popup markdown for a key and all its known translations.
+///
+/// Structure:
+/// 1. Key name as title
+/// 2. Source-locale value in a blockquote (pluralised form listed individually)
+/// 3. Other locales with compact previews
+/// 4. Footer with *clickable* links to every defining file + line (Zed supports
+///    `file://…` URIs in markdown links natively — they act as navigation
+///    buttons since LSP hover does not permit real interactive controls).
+fn format_hover_markdown(
+    key: &str,
+    values: &std::collections::BTreeMap<&i18n_core::Locale, &LocalizedValue>,
+    source_locale: &i18n_core::Locale,
+) -> String {
+    let mut md = String::with_capacity(384);
 
-fn escape_md(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('`', "\\`")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
+    // Title: the key itself.
+    md.push_str(&format!("**`{}`**\n\n", key));
+
+    // Prominent source-locale value, rendered as a blockquote.
+    if let Some(src) = values.get(source_locale) {
+        let parsed = ParsedValue::parse(&src.value);
+        if parsed.is_plural() {
+            md.push_str(&format!("> **{source_locale}** (pluralised)\n>\n"));
+            for (i, form) in parsed.forms.iter().enumerate() {
+                md.push_str(&format!(
+                    "> - `{}` — {}\n",
+                    parsed.form_label(i),
+                    escape_md(form),
+                ));
+            }
+        } else {
+            md.push_str(&format!(
+                "> **{source_locale}** — {}\n",
+                escape_md(&src.value),
+            ));
+        }
+        md.push('\n');
+    }
+
+    // Other locales (sorted alphabetically for stable output).
+    let mut others: Vec<(&i18n_core::Locale, &LocalizedValue)> = values
+        .iter()
+        .filter(|(locale, _)| locale != &&source_locale)
+        .map(|(l, v)| (*l, *v))
+        .collect();
+    others.sort_by_key(|(l, _)| l.to_string());
+
+    if !others.is_empty() {
+        md.push_str("**Other locales**\n\n");
+        for (locale, val) in others {
+            let parsed = ParsedValue::parse(&val.value);
+            let preview = truncate_chars(parsed.primary_form(), 80);
+            md.push_str(&format!("- **{locale}** — {}\n", escape_md(&preview)));
+        }
+        md.push('\n');
+    }
+
+    // Footer: clickable links to every locale file. Sorted by locale.
+    let mut files: Vec<(&i18n_core::Locale, &LocalizedValue)> =
+        values.iter().map(|(l, v)| (*l, *v)).collect();
+    files.sort_by_key(|(l, _)| l.to_string());
+
+    md.push_str("---\n**Open translation file:**\n\n");
+    for (locale, val) in files {
+        let name = val
+            .file
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+        let line = val.range.start.line + 1;
+        match Url::from_file_path(&val.file) {
+            Ok(url) => md.push_str(&format!(
+                "- **{locale}** — [`{name}:{line}`]({url})\n",
+            )),
+            Err(_) => md.push_str(&format!("- **{locale}** — `{name}:{line}`\n")),
+        }
+    }
+
+    md.push_str("\n*Press `F12` to jump to a translation in a picker.*");
+
+    md
 }
 
 /// Extract filesystem paths for every `workspace_folder` advertised by the client,

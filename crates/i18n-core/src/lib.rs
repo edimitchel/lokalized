@@ -4,6 +4,7 @@
 //! language server, MCP server, and future CLI tools.
 
 pub mod config;
+pub mod display;
 pub mod framework;
 pub mod index;
 pub mod locale;
@@ -11,6 +12,7 @@ pub mod parser;
 pub mod position;
 
 pub use config::{KeyStyle, ProjectConfig};
+pub use display::{escape_md, truncate_chars, ParsedValue};
 pub use framework::{find_usages, Framework, KeyUsage, BUILTIN_FRAMEWORKS};
 pub use index::{IndexBuilder, IndexError, KeyNode, KeyTree, LocaleIndex, LocalizedValue};
 pub use locale::{Locale, LocaleFile, LocaleLayout};
