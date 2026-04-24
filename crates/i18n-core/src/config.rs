@@ -53,6 +53,17 @@ impl ProjectConfig {
     pub fn use_file_namespace(&self) -> bool {
         self.namespace.unwrap_or(true)
     }
+
+    /// Resolve `locale_paths` (which are relative to the workspace root) to
+    /// absolute paths, keeping only directories that actually exist.
+    /// Useful for the filesystem watcher.
+    pub fn resolved_locale_dirs(&self, workspace_root: &Path) -> Vec<std::path::PathBuf> {
+        self.locale_paths
+            .iter()
+            .map(|p| workspace_root.join(p))
+            .filter(|p| p.is_dir())
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

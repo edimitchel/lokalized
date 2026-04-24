@@ -7,13 +7,15 @@
 //!   diagnostics for translation-key usages in source files.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use i18n_core::{
     find_usages, IndexBuilder, KeyUsage, LineIndex, LocaleIndex, LocalizedValue, ProjectConfig,
 };
-use tokio::sync::RwLock;
+use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::{mpsc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
@@ -37,13 +39,20 @@ struct DocumentState {
 }
 
 type DocumentStore = Arc<RwLock<HashMap<Url, DocumentState>>>;
+type IndexSlot = Arc<RwLock<Option<LocaleIndex>>>;
+type WatcherSlot = Arc<StdMutex<Option<RecommendedWatcher>>>;
 
 struct Backend {
     client: Client,
     /// Locale index. `None` until the first workspace folder is indexed.
-    index: Arc<RwLock<Option<LocaleIndex>>>,
-    /// Text + language id of every currently-open document (from LSP notifications).
+    index: IndexSlot,
+    /// Text + language id of every currently-open document.
     documents: DocumentStore,
+    /// Filesystem watcher for hot-reload of locale files. Kept alive for the
+    /// lifetime of the server; its background thread holds a Sender to the
+    /// rebuild loop, which is dropped (and thus stops the loop) when `Backend`
+    /// is dropped.
+    _watcher: WatcherSlot,
 }
 
 #[tower_lsp::async_trait]
@@ -55,9 +64,11 @@ impl LanguageServer for Backend {
 
         // Index building happens after `initialized` so the handshake stays fast.
         let index_slot = Arc::clone(&self.index);
+        let documents = Arc::clone(&self.documents);
+        let watcher_slot = Arc::clone(&self._watcher);
         let client = self.client.clone();
         tokio::spawn(async move {
-            build_indexes_for_roots(roots, index_slot, client).await;
+            build_indexes_for_roots(roots, index_slot, documents, client, watcher_slot).await;
         });
 
         Ok(InitializeResult {
@@ -269,57 +280,68 @@ impl LanguageServer for Backend {
 impl Backend {
     /// Recompute diagnostics (missing keys) for a single document and push them.
     async fn publish_diagnostics(&self, uri: &Url) {
-        let Some(doc) = self.documents.read().await.get(uri).cloned() else {
+        publish_diagnostics_for(&self.documents, &self.index, &self.client, uri).await;
+    }
+}
+
+/// Free-function version of `publish_diagnostics` used both by the `Backend`
+/// handler and by the file-watcher rebuild loop.
+async fn publish_diagnostics_for(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    client: &Client,
+    uri: &Url,
+) {
+    let Some(doc) = documents.read().await.get(uri).cloned() else {
+        return;
+    };
+    let usages = find_usages(&doc.text, &doc.language_id);
+
+    let diagnostics = {
+        let index_guard = index.read().await;
+        let Some(idx) = &*index_guard else {
             return;
         };
-        let usages = find_usages(&doc.text, &doc.language_id);
+        let source = &idx.source_locale;
+        usages
+            .into_iter()
+            .filter_map(|u| {
+                let values = idx.lookup(&u.key);
+                if values.is_empty() {
+                    Some(Diagnostic {
+                        range: to_lsp_range(&u.range),
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                            "missing-key".into(),
+                        )),
+                        source: Some("lokalize".into()),
+                        message: format!("Missing translation for key `{}`", u.key),
+                        ..Default::default()
+                    })
+                } else if !values.contains_key(source) {
+                    Some(Diagnostic {
+                        range: to_lsp_range(&u.range),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                            "missing-source".into(),
+                        )),
+                        source: Some("lokalize".into()),
+                        message: format!(
+                            "Key `{}` is missing from source locale `{}`",
+                            u.key, source
+                        ),
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
 
-        let diagnostics = {
-            let index_guard = self.index.read().await;
-            let Some(idx) = &*index_guard else {
-                return;
-            };
-            let source = &idx.source_locale;
-            usages
-                .into_iter()
-                .filter_map(|u| {
-                    let values = idx.lookup(&u.key);
-                    if values.is_empty() {
-                        Some(Diagnostic {
-                            range: to_lsp_range(&u.range),
-                            severity: Some(DiagnosticSeverity::WARNING),
-                            code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                                "missing-key".into(),
-                            )),
-                            source: Some("lokalize".into()),
-                            message: format!("Missing translation for key `{}`", u.key),
-                            ..Default::default()
-                        })
-                    } else if !values.contains_key(source) {
-                        Some(Diagnostic {
-                            range: to_lsp_range(&u.range),
-                            severity: Some(DiagnosticSeverity::INFORMATION),
-                            code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                                "missing-source".into(),
-                            )),
-                            source: Some("lokalize".into()),
-                            message: format!(
-                                "Key `{}` is missing from source locale `{}`",
-                                u.key, source
-                            ),
-                            ..Default::default()
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(doc.version))
-            .await;
-    }
+    client
+        .publish_diagnostics(uri.clone(), diagnostics, Some(doc.version))
+        .await;
 }
 
 // ---------- Helpers ----------
@@ -407,46 +429,183 @@ fn collect_workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
     Vec::new()
 }
 
-/// Build the locale index for each workspace root, storing the first successful one.
+/// Build the locale index for each workspace root, storing the first successful
+/// one and starting a filesystem watcher on it.
 async fn build_indexes_for_roots(
     roots: Vec<PathBuf>,
-    index_slot: Arc<RwLock<Option<LocaleIndex>>>,
+    index_slot: IndexSlot,
+    documents: DocumentStore,
     client: Client,
+    watcher_slot: WatcherSlot,
 ) {
     for root in roots {
-        let root_for_log = root.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let config = ProjectConfig::load(&root);
-            IndexBuilder::new(&root, &config).build()
-        })
-        .await;
-
-        match result {
-            Ok(Ok(index)) => {
-                let summary = format!(
-                    "indexed {} locale(s), {} file(s), {} unique key(s)",
-                    index.trees.len(),
-                    index.files.len(),
-                    index.all_keys().len(),
-                );
-                info!(root = %root_for_log.display(), "{summary}");
+        match build_index(&root).await {
+            Ok(index) => {
+                let summary = index_summary(&index);
+                info!(root = %root.display(), "{summary}");
                 client
                     .log_message(MessageType::INFO, format!("Lokalize: {summary}"))
                     .await;
                 *index_slot.write().await = Some(index);
-                // Phase 1: stop at the first workspace root that yields an index.
+                // Phase 1: stop at the first workspace root that yields an index,
+                // and start watching it for hot reload.
+                tokio::spawn(start_watcher(
+                    root,
+                    Arc::clone(&index_slot),
+                    documents,
+                    client,
+                    watcher_slot,
+                ));
                 return;
             }
-            Ok(Err(e)) => {
-                warn!(root = %root_for_log.display(), "no index built: {e}");
-            }
             Err(e) => {
-                error!(root = %root_for_log.display(), "indexer task panicked: {e}");
+                warn!(root = %root.display(), "no index built: {e}");
             }
         }
     }
 
     warn!("no usable workspace root found — no locale index built");
+}
+
+/// Build a single index for a single root, blocking filesystem work moved off
+/// the tokio reactor.
+async fn build_index(root: &Path) -> std::result::Result<LocaleIndex, String> {
+    let root = root.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        let config = ProjectConfig::load(&root);
+        IndexBuilder::new(&root, &config).build()
+    })
+    .await
+    {
+        Ok(Ok(index)) => Ok(index),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("indexer task panicked: {e}")),
+    }
+}
+
+fn index_summary(index: &LocaleIndex) -> String {
+    format!(
+        "indexed {} locale(s), {} file(s), {} unique key(s)",
+        index.trees.len(),
+        index.files.len(),
+        index.all_keys().len(),
+    )
+}
+
+// ---------- File watcher ----------
+
+/// Events buffered during this window are coalesced into a single rebuild.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Start a filesystem watcher on every resolved locale directory under `root`.
+///
+/// The `notify` callback runs on its own OS thread; we bridge into async-land
+/// through an mpsc channel. The rebuild loop ends only when the watcher is
+/// dropped (i.e. when `Backend` is dropped at LSP shutdown).
+async fn start_watcher(
+    root: PathBuf,
+    index_slot: IndexSlot,
+    documents: DocumentStore,
+    client: Client,
+    watcher_slot: WatcherSlot,
+) {
+    let config = ProjectConfig::load(&root);
+    let locale_dirs = config.resolved_locale_dirs(&root);
+    if locale_dirs.is_empty() {
+        warn!(root = %root.display(), "watcher: no locale dirs to watch");
+        return;
+    }
+
+    let (tx, mut rx) = mpsc::channel::<()>(128);
+    let cb_tx = tx.clone();
+    let result = notify::recommended_watcher(move |res: notify::Result<NotifyEvent>| {
+        if let Ok(event) = res {
+            if is_locale_event(&event) {
+                // `try_send` is fine — on overflow we just drop the event, the
+                // debouncer will pick up later notifications anyway.
+                let _ = cb_tx.try_send(());
+            }
+        }
+    });
+    let mut watcher = match result {
+        Ok(w) => w,
+        Err(e) => {
+            error!("failed to create watcher: {e}");
+            return;
+        }
+    };
+
+    for p in &locale_dirs {
+        match watcher.watch(p, RecursiveMode::Recursive) {
+            Ok(()) => info!(path = %p.display(), "watching locale dir"),
+            Err(e) => warn!(path = %p.display(), "watch failed: {e}"),
+        }
+    }
+    // Store the watcher so its background thread stays alive. Dropping it would
+    // close the channel and kill the rebuild loop.
+    if let Ok(mut slot) = watcher_slot.lock() {
+        *slot = Some(watcher);
+    }
+
+    // Drop our extra Sender so the loop exits naturally when the watcher is
+    // dropped (only the callback's Sender remains).
+    drop(tx);
+
+    while rx.recv().await.is_some() {
+        // Debounce: consume every additional event queued during the window.
+        tokio::time::sleep(WATCH_DEBOUNCE).await;
+        while rx.try_recv().is_ok() {}
+
+        info!(root = %root.display(), "locale change detected, rebuilding index");
+        match build_index(&root).await {
+            Ok(index) => {
+                let summary = index_summary(&index);
+                info!(root = %root.display(), "{summary} (reload)");
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Lokalize: {summary} (reload)"),
+                    )
+                    .await;
+                *index_slot.write().await = Some(index);
+                republish_all_diagnostics(&documents, &index_slot, &client).await;
+                // Inlay hints follow a pull model: the editor only re-fetches
+                // them when we ask it to. Without this, inlay hints keep
+                // showing stale translations until the user edits the buffer.
+                if let Err(e) = client.inlay_hint_refresh().await {
+                    warn!("inlay_hint_refresh failed: {e}");
+                }
+            }
+            Err(e) => warn!("index rebuild failed: {e}"),
+        }
+    }
+
+    info!("watcher loop ended");
+}
+
+fn is_locale_event(event: &NotifyEvent) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) && event.paths.iter().any(|p| is_locale_file(p))
+}
+
+fn is_locale_file(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e, "json" | "jsonc" | "json5" | "arb" | "yml" | "yaml"))
+        .unwrap_or(false)
+}
+
+async fn republish_all_diagnostics(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    client: &Client,
+) {
+    let uris: Vec<Url> = documents.read().await.keys().cloned().collect();
+    for uri in uris {
+        publish_diagnostics_for(documents, index, client, &uri).await;
+    }
 }
 
 fn init_tracing() {
@@ -491,6 +650,7 @@ async fn main() {
         client,
         index: Arc::new(RwLock::new(None)),
         documents: Arc::new(RwLock::new(HashMap::new())),
+        _watcher: Arc::new(StdMutex::new(None)),
     });
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();

@@ -12,7 +12,8 @@ name = "lokalize-lsp"
 path = "src/main.rs"
 
 [dependencies]
-i18n-core.workspace = true
+i18n-core = { workspace = true }
+notify.workspace = true
 tokio.workspace = true
 tower-lsp.workspace = true
 tracing.workspace = true

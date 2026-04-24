@@ -165,6 +165,17 @@ lokalize-vue/
 - [ ] Parsing des locales en parallèle avec `rayon` (Phase 1.5)
 - [ ] Cache disque dans `$XDG_CACHE_HOME/lokalize/<hash>.bin` (bincode) (Phase 6)
 
+### Hot reload (file watcher)
+
+- [x] Crate `notify` sur les `localePaths` résolus (récursif)
+- [x] Filtre : seuls create/modify/remove sur `.json/.jsonc/.json5/.arb/.yml/.yaml`
+- [x] Bridge sync→async via `tokio::sync::mpsc`
+- [x] Debounce 300ms pour agréger les events en rafale
+- [x] Rebuild complet de l'index + swap atomique
+- [x] `republish_diagnostics` pour chaque doc ouvert
+- [x] `client.inlay_hint_refresh()` pour invalider le cache inlay côté Zed
+- [x] Config `namespace: false` (parité i18n-ally pour JSON self-wrappés)
+
 ---
 
 ## Phase 4 — Refactoring & code actions (≈ 2-3 j)
