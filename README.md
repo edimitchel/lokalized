@@ -1,4 +1,4 @@
-# Lokalize — Zed extension for i18n
+# LokaliZed — Zed extension for i18n
 
 All-in-one internationalization support for Zed: inline translations, hover previews,
 go-to-definition, diagnostics, and more.
