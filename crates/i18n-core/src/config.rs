@@ -20,7 +20,8 @@ const CANDIDATE_LOCALE_DIRS: &[&str] = &[
 /// Configuration for a Lokalize-enabled workspace.
 ///
 /// Loaded from `.zed/lokalize.json`. All fields are optional — missing values
-/// fall back to filesystem heuristics.
+/// fall back to filesystem heuristics. Field names mirror the i18n-ally VSCode
+/// extension settings to simplify migration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -35,6 +36,23 @@ pub struct ProjectConfig {
 
     /// Key style: `nested` (a.b.c) vs `flat` (literal dotted key), or `auto`.
     pub key_style: Option<KeyStyle>,
+
+    /// When using nested layouts (`fr/slots.json`), should the filename stem
+    /// be prepended as the top-level namespace of every key ?
+    ///
+    /// - `Some(true)` (default) — keys in `slots.json` are indexed under `slots.*`
+    ///   (matches i18n-ally with `namespace: true`).
+    /// - `Some(false)` — keys are indexed exactly as they appear; use this when
+    ///   each JSON already wraps its content in a namespace key (matches
+    ///   `i18n-ally.namespace: false`).
+    pub namespace: Option<bool>,
+}
+
+impl ProjectConfig {
+    /// Whether the filename stem should be prepended as the top-level namespace.
+    pub fn use_file_namespace(&self) -> bool {
+        self.namespace.unwrap_or(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -171,6 +171,7 @@ impl<'a> IndexBuilder<'a> {
 
         let layout = Self::detect_layout(&files);
         let source_locale = self.config.resolved_source_locale();
+        let use_file_namespace = self.config.use_file_namespace();
 
         let mut trees: BTreeMap<Locale, KeyTree> = BTreeMap::new();
         for file in &files {
@@ -178,7 +179,11 @@ impl<'a> IndexBuilder<'a> {
             let tree = trees.entry(file.locale.clone()).or_default();
             for entry in entries {
                 let mut full_path = Vec::new();
-                if layout == LocaleLayout::Nested {
+                // Only prepend the filename stem when the user opts into the
+                // `namespace = true` i18n-ally semantics. Projects where each
+                // JSON already wraps its content (`{ "slots": {...} }`) should
+                // set `namespace: false` to avoid double-prefixing.
+                if layout == LocaleLayout::Nested && use_file_namespace {
                     if let Some(ns) = &file.namespace {
                         full_path.push(ns.clone());
                     }
