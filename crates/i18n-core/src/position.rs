@@ -65,6 +65,31 @@ impl<'a> LineIndex<'a> {
             end: self.position(end),
         }
     }
+
+    /// Inverse of [`position`]: convert a (line, utf-16 character) pair into
+    /// a byte offset in the source. Returns `None` if the position is out of
+    /// bounds.
+    pub fn offset_at(&self, line: u32, character: u32) -> Option<usize> {
+        let line_start = *self.line_starts.get(line as usize)?;
+        let next_line_start = self
+            .line_starts
+            .get(line as usize + 1)
+            .copied()
+            .unwrap_or(self.source.len());
+        let line_text = &self.source[line_start..next_line_start];
+
+        let mut utf16: u32 = 0;
+        for (i, c) in line_text.char_indices() {
+            if utf16 >= character {
+                return Some(line_start + i);
+            }
+            utf16 += c.len_utf16() as u32;
+        }
+        if utf16 >= character {
+            return Some(next_line_start);
+        }
+        Some(next_line_start)
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +136,26 @@ mod tests {
         let idx = LineIndex::new(src);
         // offset 4 = after emoji, before "x"
         assert_eq!(idx.position(4).character, 2);
+    }
+
+    #[test]
+    fn offset_at_roundtrip() {
+        let src = "hello\nworld\nfoo";
+        let idx = LineIndex::new(src);
+        for offset in 0..=src.len() {
+            let pos = idx.position(offset);
+            let roundtrip = idx.offset_at(pos.line, pos.character).unwrap();
+            assert_eq!(roundtrip, offset, "roundtrip mismatch at {offset}");
+        }
+    }
+
+    #[test]
+    fn offset_at_with_emoji() {
+        let src = "a😀b";
+        let idx = LineIndex::new(src);
+        // 'a' = 1 utf16 unit, 😀 = 2, 'b' = 1
+        assert_eq!(idx.offset_at(0, 0), Some(0));
+        assert_eq!(idx.offset_at(0, 1), Some(1)); // before emoji
+        assert_eq!(idx.offset_at(0, 3), Some(5)); // after emoji, at 'b'
     }
 }

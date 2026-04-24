@@ -122,40 +122,48 @@ lokalize-vue/
 
 ### Capabilities dans `initialize`
 
-- [ ] hoverProvider
-- [ ] inlayHintProvider
-- [ ] definitionProvider (avec `LocationLink[]`)
-- [ ] referencesProvider
-- [ ] completionProvider (trigger chars : `"`, `'`, `` ` ``, `.`)
-- [ ] codeActionProvider
-- [ ] renameProvider (avec prepare)
-- [ ] workspaceSymbolProvider
-- [ ] documentSymbolProvider
+- [x] hoverProvider
+- [x] inlayHintProvider
+- [x] definitionProvider
+- [x] completionProvider (trigger chars : `"`, `'`, `` ` ``, `.`)
+- [ ] referencesProvider (Phase 3.5)
+- [ ] codeActionProvider (Phase 4)
+- [ ] renameProvider (Phase 4)
+- [ ] workspaceSymbolProvider (Phase 3.5)
+- [ ] documentSymbolProvider (Phase 3.5)
 
 ### Handlers
 
-- [ ] **Hover** : markdown listant toutes les locales + liens `file://`
-- [ ] **Inlay Hint** : texte de la traduction source après `t(…)`, label cliquable
-- [ ] **Definition** : liste de `LocationLink` vers chaque fichier de locale
-- [ ] **Completion** : items filtrés par scope, doc = traduction source
-- [ ] **Diagnostics** (sur `didOpen` / `didChange` / watcher) :
-  - [ ] clé utilisée mais absente de la source locale
-  - [ ] clé utilisée mais absente d'une locale cible
-  - [ ] valeur vide dans une locale
-  - [ ] clé inutilisée (scan global, diagnostic sur le fichier de locale)
-- [ ] **Workspace Symbol** : fuzzy match sur toutes les clés
+- [x] **Hover** : markdown listant toutes les locales (via `idx.lookup(key)`)
+- [x] **Inlay Hint** : ` = <traduction>` après chaque `t(…)`, tronquée à 40 chars
+- [x] **Definition** : liste de `Location` pointant chaque fichier de locale
+- [x] **Completion** : toutes les clés du projet avec preview source en `detail`
+- [x] **Diagnostics** push sur `didOpen` / `didChange` :
+  - [x] clé utilisée mais absente de toutes les locales → WARNING `missing-key`
+  - [x] clé utilisée mais absente de la source locale → INFO `missing-source`
+  - [ ] valeur vide dans une locale (Phase 3.5)
+  - [ ] clé inutilisée (scan global, sur le fichier de locale) (Phase 3.5)
+- [ ] **Workspace Symbol** : fuzzy match sur toutes les clés (Phase 3.5)
 
 ### Config workspace
 
-- [ ] Réception de `workspace/configuration` avec :
-      `locale_paths`, `source_locale`, `enabled_frameworks`, `diagnostics`, `key_style`
-- [ ] Rechargement à chaud sur `workspace/didChangeConfiguration`
+- [x] Lecture de `.zed/lokalize.json` côté LSP (`ProjectConfig::load`)
+- [ ] Réception de `workspace/configuration` via LSP standard (Phase 3.5)
+- [ ] Rechargement à chaud sur `workspace/didChangeConfiguration` (Phase 3.5)
+
+### Document store
+
+- [x] `Arc<RwLock<HashMap<Url, DocumentState>>>` — text + language_id + version
+- [x] `did_open` / `did_change` (TextDocumentSyncKind::FULL) / `did_close`
+- [x] Helper `usage_at_position(doc, pos)` pour hover/definition
+- [x] Helper `LineIndex::offset_at(line, char)` pour position → byte offset
 
 ### Perf
 
-- [ ] Index partagé `Arc<RwLock<Index>>`
-- [ ] Parsing des locales en parallèle avec `rayon`
-- [ ] Cache disque dans `$XDG_CACHE_HOME/lokalize/<hash>.bin` (bincode)
+- [x] Index partagé `Arc<RwLock<Option<LocaleIndex>>>`
+- [x] Construction de l'index hors-main-thread via `spawn_blocking` (handshake instant)
+- [ ] Parsing des locales en parallèle avec `rayon` (Phase 1.5)
+- [ ] Cache disque dans `$XDG_CACHE_HOME/lokalize/<hash>.bin` (bincode) (Phase 6)
 
 ---
 

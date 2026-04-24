@@ -44,7 +44,11 @@ pub struct Framework {
 
 impl Framework {
     pub fn applies_to(&self, language_id: &str) -> bool {
-        self.language_ids.contains(&language_id)
+        // Zed can send language ids in different cases depending on the client
+        // (`Vue.js` vs `vue.js`). Match case-insensitively to stay robust.
+        self.language_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(language_id))
     }
 
     /// Scan `source` and return every key usage matched by this framework's patterns.
