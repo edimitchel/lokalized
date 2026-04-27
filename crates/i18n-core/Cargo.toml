@@ -14,3 +14,6 @@ thiserror.workspace = true
 jsonc-parser.workspace = true
 walkdir.workspace = true
 regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

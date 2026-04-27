@@ -21,6 +21,8 @@ pub enum MutationError {
     PathCollision(String),
     /// Leaf key already exists at the requested path.
     KeyAlreadyExists(String),
+    /// Path doesn't resolve to an existing key in the document.
+    KeyNotFound(String),
     /// Empty key path provided.
     EmptyPath,
     /// Re-serialisation of the mutated tree failed.
@@ -35,6 +37,7 @@ impl fmt::Display for MutationError {
                 write!(f, "path collision at `{p}` (non-object in the way)")
             }
             Self::KeyAlreadyExists(p) => write!(f, "key `{p}` already exists"),
+            Self::KeyNotFound(p) => write!(f, "key `{p}` not found"),
             Self::EmptyPath => write!(f, "empty key path"),
             Self::Serialize(e) => write!(f, "JSON serialize error: {e}"),
         }
@@ -110,6 +113,71 @@ fn insert_into_value(
             .expect("branch was just inserted or already present");
     }
     Ok(())
+}
+
+/// Remove the leaf key at `path` from a JSON document.
+///
+/// - Empty intermediate objects left behind by the removal are pruned
+///   recursively, mirroring the cleanup behaviour of i18n-ally.
+/// - The original indent style and trailing newline are preserved.
+///
+/// Returns the new file contents on success, or an error if the path doesn't
+/// resolve to an existing key.
+pub fn remove_key_json(content: &str, path: &[&str]) -> Result<String, MutationError> {
+    if path.is_empty() {
+        return Err(MutationError::EmptyPath);
+    }
+
+    let mut root: Value = serde_json::from_str(content).map_err(MutationError::Parse)?;
+    let indent = detect_indent(content);
+    let trailing_newline = content.ends_with('\n');
+
+    if !remove_from_value(&mut root, path) {
+        return Err(MutationError::KeyNotFound(path.join(".")));
+    }
+
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    root.serialize(&mut ser).map_err(MutationError::Serialize)?;
+
+    let mut out = String::from_utf8(buf).expect("serde_json emits UTF-8");
+    if trailing_newline && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Drill down `path` and remove the matching entry from its parent map.
+///
+/// Returns `true` only when the leaf was actually present. After a successful
+/// removal we walk back up and prune any branch that became an empty object,
+/// so removing the only key of a namespace cleans the namespace entirely.
+fn remove_from_value(value: &mut Value, path: &[&str]) -> bool {
+    let Some(map) = value.as_object_mut() else {
+        return false;
+    };
+    let Some((head, rest)) = path.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return map.shift_remove(*head).is_some();
+    }
+    let removed = match map.get_mut(*head) {
+        Some(child) => remove_from_value(child, rest),
+        None => false,
+    };
+    if removed {
+        let prune = map
+            .get(*head)
+            .and_then(|v| v.as_object())
+            .map(|m| m.is_empty())
+            .unwrap_or(false);
+        if prune {
+            map.shift_remove(*head);
+        }
+    }
+    removed
 }
 
 /// Insert `key -> value` into `map`, respecting the existing ordering:
@@ -305,6 +373,83 @@ mod tests {
     fn errors_on_invalid_json() {
         let err = insert_key_json("not json", &["a"], "x").unwrap_err();
         assert!(matches!(err, MutationError::Parse(_)));
+    }
+
+    #[test]
+    fn remove_leaf_keeps_siblings_and_indent() {
+        let input = r#"{
+  "a": "1",
+  "b": "2",
+  "c": "3"
+}
+"#;
+        let out = remove_key_json(input, &["b"]).unwrap();
+        assert_eq!(
+            out,
+            r#"{
+  "a": "1",
+  "c": "3"
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_prunes_empty_parent_branches() {
+        let input = r#"{
+  "slots": {
+    "table": "Table"
+  },
+  "common": {
+    "ok": "OK"
+  }
+}
+"#;
+        let out = remove_key_json(input, &["slots", "table"]).unwrap();
+        // The now-empty `slots` namespace should be pruned entirely.
+        assert_eq!(
+            out,
+            r#"{
+  "common": {
+    "ok": "OK"
+  }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_keeps_non_empty_parent_branch() {
+        let input = r#"{
+  "slots": {
+    "table": "Table",
+    "menu": "Menu"
+  }
+}
+"#;
+        let out = remove_key_json(input, &["slots", "table"]).unwrap();
+        assert_eq!(
+            out,
+            r#"{
+  "slots": {
+    "menu": "Menu"
+  }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn remove_errors_when_key_absent() {
+        let input = r#"{ "a": "1" }"#;
+        let err = remove_key_json(input, &["b"]).unwrap_err();
+        assert!(matches!(err, MutationError::KeyNotFound(_)));
+    }
+
+    #[test]
+    fn remove_errors_on_empty_path() {
+        let err = remove_key_json("{}", &[]).unwrap_err();
+        assert!(matches!(err, MutationError::EmptyPath));
     }
 
     #[test]

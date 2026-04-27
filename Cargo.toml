@@ -43,6 +43,7 @@ jsonc-parser = "0.32"
 walkdir = "2"
 regex = "1"
 notify = "6"
+tempfile = "3"
 i18n-core = { path = "crates/i18n-core" }
 
 [profile.release]

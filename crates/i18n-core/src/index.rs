@@ -1,19 +1,24 @@
 //! In-memory index mapping translation keys to their values across locales.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::config::ProjectConfig;
 use crate::locale::{Locale, LocaleFile, LocaleLayout};
 use crate::parser::{parse_file, ParseError};
 use crate::position::Range;
+use crate::scan::UsageIndex;
 
 /// One translation value at a specific location in a locale file.
 #[derive(Clone, Debug)]
 pub struct LocalizedValue {
     pub value: String,
     pub file: PathBuf,
+    /// Range of the value literal inside the file. Used by hover and goto.
     pub range: Range,
+    /// Range of the leaf key (the property name) inside the file. Used by
+    /// diagnostics that decorate the key itself, e.g. unused translations.
+    pub key_range: Range,
 }
 
 /// Tree of keys: `{ common: { submit: Leaf("Submit"), cancel: Leaf("Cancel") } }`.
@@ -101,6 +106,49 @@ impl LocaleIndex {
         diff_tree(source, target, &mut Vec::new(), &mut missing);
         missing
     }
+
+    /// Group every leaf in the index by its defining file. The returned
+    /// vectors hold `(dotted_key, &LocalizedValue)` pairs in the natural
+    /// traversal order (alphabetical, since the tree is a `BTreeMap`).
+    ///
+    /// Convenient for diagnostics that need to walk a single locale file's
+    /// keys with their source ranges already attached.
+    pub fn entries_by_file(&self) -> HashMap<PathBuf, Vec<(String, &LocalizedValue)>> {
+        let mut out: HashMap<PathBuf, Vec<_>> = HashMap::new();
+        for tree in self.trees.values() {
+            collect_entries_by_file(tree, &mut Vec::new(), &mut out);
+        }
+        out
+    }
+
+    /// Subset of [`Self::all_keys`] that no source file in `usages`
+    /// references. Best-effort: dynamic keys (`t(name)`, template literals)
+    /// look unused to this scan and the LSP surfaces them at `Hint`
+    /// severity to avoid false-positive noise.
+    pub fn unused_keys(&self, usages: &UsageIndex) -> Vec<String> {
+        self.all_keys()
+            .into_iter()
+            .filter(|k| !usages.is_key_used(k))
+            .collect()
+    }
+
+    /// Compose the full dotted key for an entry parsed from `file`, applying
+    /// the same namespace prefixing rules [`IndexBuilder`] uses.
+    ///
+    /// This lets diagnostics that re-parse a live buffer (instead of trusting
+    /// the on-disk index) reconstruct the same dotted keys the source-side
+    /// scanner sees, so usage lookups stay consistent.
+    pub fn compose_full_key(&self, file: &LocaleFile, key_path: &[String]) -> String {
+        let mut full: Vec<String> = Vec::with_capacity(key_path.len() + 1);
+        let nested = matches!(self.layout, Some(LocaleLayout::Nested));
+        if nested && self.config.use_file_namespace() {
+            if let Some(ns) = &file.namespace {
+                full.push(ns.clone());
+            }
+        }
+        full.extend(key_path.iter().cloned());
+        full.join(".")
+    }
 }
 
 fn collect_keys(tree: &KeyTree, path: &mut Vec<String>, out: &mut BTreeSet<String>) {
@@ -111,6 +159,25 @@ fn collect_keys(tree: &KeyTree, path: &mut Vec<String>, out: &mut BTreeSet<Strin
                 out.insert(path.join("."));
             }
             KeyNode::Branch(sub) => collect_keys(sub, path, out),
+        }
+        path.pop();
+    }
+}
+
+fn collect_entries_by_file<'a>(
+    tree: &'a KeyTree,
+    path: &mut Vec<String>,
+    out: &mut HashMap<PathBuf, Vec<(String, &'a LocalizedValue)>>,
+) {
+    for (name, node) in &tree.children {
+        path.push(name.clone());
+        match node {
+            KeyNode::Leaf(v) => {
+                out.entry(v.file.clone())
+                    .or_default()
+                    .push((path.join("."), v));
+            }
+            KeyNode::Branch(sub) => collect_entries_by_file(sub, path, out),
         }
         path.pop();
     }
@@ -200,6 +267,7 @@ impl<'a> IndexBuilder<'a> {
                         value: entry.value,
                         file: file.path.clone(),
                         range: entry.range,
+                        key_range: entry.key_range,
                     },
                 );
             }
@@ -311,6 +379,7 @@ mod tests {
             value: text.to_string(),
             file: PathBuf::from("/tmp/en.json"),
             range: Range::default(),
+            key_range: Range::default(),
         }
     }
 
@@ -356,6 +425,54 @@ mod tests {
         idx.trees.insert(Locale::new("fr"), fr);
 
         assert_eq!(idx.all_keys(), vec!["a.b".to_string(), "a.c".to_string()]);
+    }
+
+    #[test]
+    fn index_unused_keys_filters_against_usage_index() {
+        let mut idx = LocaleIndex::default();
+        let mut en = KeyTree::default();
+        en.insert(&["used".into()], value("U"));
+        en.insert(&["dead".into()], value("D"));
+        idx.trees.insert(Locale::new("en"), en);
+
+        let mut usages = UsageIndex::new();
+        usages.update_file(
+            PathBuf::from("/x.ts"),
+            r#"t("used");"#,
+            "TypeScript",
+        );
+
+        assert_eq!(idx.unused_keys(&usages), vec!["dead".to_string()]);
+    }
+
+    #[test]
+    fn index_entries_by_file_groups_leaves() {
+        let mut idx = LocaleIndex::default();
+
+        let en_value = LocalizedValue {
+            value: "Hi".into(),
+            file: PathBuf::from("/en.json"),
+            range: Range::default(),
+            key_range: Range::default(),
+        };
+        let fr_value = LocalizedValue {
+            value: "Salut".into(),
+            file: PathBuf::from("/fr.json"),
+            range: Range::default(),
+            key_range: Range::default(),
+        };
+
+        let mut en = KeyTree::default();
+        en.insert(&["hello".into()], en_value);
+        let mut fr = KeyTree::default();
+        fr.insert(&["hello".into()], fr_value);
+        idx.trees.insert(Locale::new("en"), en);
+        idx.trees.insert(Locale::new("fr"), fr);
+
+        let by_file = idx.entries_by_file();
+        assert_eq!(by_file.len(), 2);
+        assert_eq!(by_file[&PathBuf::from("/en.json")][0].0, "hello");
+        assert_eq!(by_file[&PathBuf::from("/fr.json")][0].0, "hello");
     }
 
     // Suppress the unused-import warning from the enclosing module when this

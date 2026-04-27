@@ -29,7 +29,7 @@ impl LocaleParser for JsonParser {
 
         if let Some(root) = parse_result.value {
             let mut path = Vec::new();
-            walk_value(&root, &mut path, &line_index, &mut entries);
+            walk_value(&root, &mut path, None, &line_index, &mut entries);
         }
 
         Ok(entries)
@@ -39,15 +39,21 @@ impl LocaleParser for JsonParser {
 fn walk_value(
     value: &Value,
     path: &mut Vec<String>,
+    key_range: Option<crate::position::Range>,
     lines: &LineIndex,
     out: &mut Vec<LocaleEntry>,
 ) {
     match value {
         Value::StringLit(lit) => {
+            // Top-level string with no parent property is meaningless as a
+            // translation entry — skip it. Every real entry has a key range
+            // because the parser only descends into properties of objects.
+            let Some(kr) = key_range else { return };
             out.push(LocaleEntry {
                 key_path: path.clone(),
                 value: lit.value.to_string(),
                 range: lines.range(lit.start(), lit.end()),
+                key_range: kr,
             });
         }
         Value::Object(obj) => walk_object(obj, path, lines, out),
@@ -69,8 +75,9 @@ fn walk_object(
         if name.starts_with('@') {
             continue;
         }
+        let key_range = lines.range(prop.name.start(), prop.name.end());
         path.push(name.to_string());
-        walk_value(&prop.value, path, lines, out);
+        walk_value(&prop.value, path, Some(key_range), lines, out);
         path.pop();
     }
 }
@@ -123,6 +130,27 @@ mod tests {
         assert_eq!(e[0].range.end.offset, 9);
         assert_eq!(e[0].range.start.line, 0);
         assert_eq!(e[0].range.start.character, 5);
+    }
+
+    #[test]
+    fn records_key_range_separately_from_value_range() {
+        let src = r#"{"hello": "Hi"}"#;
+        let e = entries(src);
+        // The key `"hello"` (with quotes) spans bytes 1..8.
+        assert_eq!(&src[e[0].key_range.start.offset..e[0].key_range.end.offset], "\"hello\"");
+        // And it must not overlap with the value range.
+        assert!(e[0].key_range.end.offset <= e[0].range.start.offset);
+    }
+
+    #[test]
+    fn key_range_points_at_leaf_property_in_nested_object() {
+        let src = r#"{ "common": { "submit": "Submit" } }"#;
+        let e = entries(src);
+        // The leaf entry's key range should point at `"submit"`, not `"common"`.
+        assert_eq!(
+            &src[e[0].key_range.start.offset..e[0].key_range.end.offset],
+            "\"submit\"",
+        );
     }
 
     #[test]

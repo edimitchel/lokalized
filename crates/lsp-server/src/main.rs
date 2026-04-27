@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use i18n_core::{
-    escape_md, find_usages, insert_key_json, truncate_chars, IndexBuilder, KeyUsage, LineIndex,
-    LocaleFile, LocaleIndex, LocaleLayout, LocalizedValue, ParsedValue, ProjectConfig,
+    escape_md, find_usages, insert_key_json, remove_key_json, truncate_chars, IndexBuilder,
+    KeyUsage, LineIndex, LocaleFile, LocaleIndex, LocaleLayout, LocalizedValue, ParsedValue,
+    ProjectConfig, UsageIndex,
 };
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, RwLock};
@@ -43,12 +44,18 @@ struct DocumentState {
 
 type DocumentStore = Arc<RwLock<HashMap<Url, DocumentState>>>;
 type IndexSlot = Arc<RwLock<Option<LocaleIndex>>>;
+type UsageSlot = Arc<RwLock<UsageIndex>>;
 type WatcherSlot = Arc<StdMutex<Option<RecommendedWatcher>>>;
 
 struct Backend {
     client: Client,
     /// Locale index. `None` until the first workspace folder is indexed.
     index: IndexSlot,
+    /// Reverse usage index: which translation keys are referenced from each
+    /// source file. Drives the "unused translation" diagnostic on locale
+    /// files. Populated by an initial project walk and kept up to date on
+    /// every `did_change`/`did_open` of a source document.
+    usages: UsageSlot,
     /// Text + language id of every currently-open document.
     documents: DocumentStore,
     /// Filesystem watcher for hot-reload of locale files. Kept alive for the
@@ -67,11 +74,20 @@ impl LanguageServer for Backend {
 
         // Index building happens after `initialized` so the handshake stays fast.
         let index_slot = Arc::clone(&self.index);
+        let usage_slot = Arc::clone(&self.usages);
         let documents = Arc::clone(&self.documents);
         let watcher_slot = Arc::clone(&self._watcher);
         let client = self.client.clone();
         tokio::spawn(async move {
-            build_indexes_for_roots(roots, index_slot, documents, client, watcher_slot).await;
+            build_indexes_for_roots(
+                roots,
+                index_slot,
+                usage_slot,
+                documents,
+                client,
+                watcher_slot,
+            )
+            .await;
         });
 
         Ok(InitializeResult {
@@ -123,24 +139,44 @@ impl LanguageServer for Backend {
         self.documents.write().await.insert(
             doc.uri.clone(),
             DocumentState {
-                text: doc.text,
-                language_id: doc.language_id,
+                text: doc.text.clone(),
+                language_id: doc.language_id.clone(),
                 version: doc.version,
             },
         );
+
+        let usages_changed = self
+            .maybe_update_usages(&doc.uri, &doc.language_id, &doc.text)
+            .await;
         self.publish_diagnostics(&doc.uri).await;
+        if usages_changed {
+            self.republish_locale_diagnostics().await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        if let Some(change) = params.content_changes.into_iter().next() {
+        let snapshot = if let Some(change) = params.content_changes.into_iter().next() {
             let mut store = self.documents.write().await;
-            if let Some(doc) = store.get_mut(&uri) {
+            store.get_mut(&uri).map(|doc| {
                 doc.text = change.text;
                 doc.version = params.text_document.version;
-            }
-        }
+                (doc.text.clone(), doc.language_id.clone())
+            })
+        } else {
+            None
+        };
+
+        let usages_changed = if let Some((text, lang)) = snapshot.as_ref() {
+            self.maybe_update_usages(&uri, lang, text).await
+        } else {
+            false
+        };
+
         self.publish_diagnostics(&uri).await;
+        if usages_changed {
+            self.republish_locale_diagnostics().await;
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -251,9 +287,24 @@ impl LanguageServer for Backend {
         &self,
         params: CodeActionParams,
     ) -> Result<Option<CodeActionResponse>> {
-        let uri = params.text_document.uri;
+        let uri = params.text_document.uri.clone();
         let pos = params.range.start;
         info!(%uri, line = pos.line, character = pos.character, "code_action request");
+
+        // Locale JSON files: only "Remove unused key" is offered. The source-
+        // side actions below assume a translation-call usage at the cursor,
+        // which never matches inside a JSON document.
+        if is_indexed_locale_uri(&self.index, &uri).await {
+            let actions = build_locale_code_actions(
+                &self.documents,
+                &self.index,
+                &self.usages,
+                &uri,
+                pos,
+            )
+            .await;
+            return Ok(actions);
+        }
 
         let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
             info!("code_action: no document state");
@@ -324,70 +375,226 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
-    /// Recompute diagnostics (missing keys) for a single document and push them.
+    /// Recompute diagnostics for a single document (source or locale) and
+    /// push them to the client.
     async fn publish_diagnostics(&self, uri: &Url) {
-        publish_diagnostics_for(&self.documents, &self.index, &self.client, uri).await;
+        publish_diagnostics_for(&self.documents, &self.index, &self.usages, &self.client, uri)
+            .await;
+    }
+
+    /// Refresh the reverse [`UsageIndex`] for `uri` if it points at a
+    /// supported source-code file (Vue/TS/JS/...). Returns `true` when the
+    /// index was actually modified, so callers can decide whether to
+    /// republish the locale-side diagnostics that depend on it.
+    async fn maybe_update_usages(&self, uri: &Url, language_id: &str, text: &str) -> bool {
+        if !is_supported_source_lang(language_id) {
+            return false;
+        }
+        // Defensive: a Vue file shouldn't ever land in `idx.files`, but
+        // if a project is mis-configured we'd rather skip than corrupt
+        // the usage index with locale-file content.
+        if is_indexed_locale_uri(&self.index, uri).await {
+            return false;
+        }
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        self.usages.write().await.update_file(path, text, language_id);
+        true
+    }
+
+    /// Re-emit unused-key diagnostics for every open locale file. Triggered
+    /// after the [`UsageIndex`] changes so the editor's faded-key markers
+    /// stay in sync with what the source code actually references.
+    async fn republish_locale_diagnostics(&self) {
+        let uris: Vec<Url> = self.documents.read().await.keys().cloned().collect();
+        for uri in uris {
+            if is_indexed_locale_uri(&self.index, &uri).await {
+                self.publish_diagnostics(&uri).await;
+            }
+        }
     }
 }
 
-/// Free-function version of `publish_diagnostics` used both by the `Backend`
-/// handler and by the file-watcher rebuild loop.
+/// Language ids the project-wide source scan understands. Kept in sync with
+/// the file-extension matcher in [`i18n_core::scan`].
+fn is_supported_source_lang(language_id: &str) -> bool {
+    matches!(
+        language_id.to_ascii_lowercase().as_str(),
+        "vue.js" | "typescript" | "tsx" | "javascript" | "jsx" | "html"
+    )
+}
+
+/// Free-function version of [`Backend::publish_diagnostics`] used by the
+/// watcher rebuild loop and by other helpers that don't carry a `Backend`.
+///
+/// Dispatches based on whether `uri` is a locale file known to the index:
+///
+/// - **Locale file** → "unused translation" diagnostics computed from the
+///   reverse [`UsageIndex`].
+/// - **Anything else** → the existing source-side diagnostics for missing
+///   translations of the keys referenced in the document.
 async fn publish_diagnostics_for(
     documents: &DocumentStore,
     index: &IndexSlot,
+    usages: &UsageSlot,
     client: &Client,
     uri: &Url,
 ) {
     let Some(doc) = documents.read().await.get(uri).cloned() else {
         return;
     };
-    let usages = find_usages(&doc.text, &doc.language_id);
 
-    let diagnostics = {
-        let index_guard = index.read().await;
-        let Some(idx) = &*index_guard else {
-            return;
-        };
-        let source = &idx.source_locale;
-        usages
-            .into_iter()
-            .filter_map(|u| {
-                let values = idx.lookup(&u.key);
-                if values.is_empty() {
-                    Some(Diagnostic {
-                        range: to_lsp_range(&u.range),
-                        severity: Some(DiagnosticSeverity::WARNING),
-                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                            "missing-key".into(),
-                        )),
-                        source: Some("lokalize".into()),
-                        message: format!("Missing translation for key `{}`", u.key),
-                        ..Default::default()
-                    })
-                } else if !values.contains_key(source) {
-                    Some(Diagnostic {
-                        range: to_lsp_range(&u.range),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                            "missing-source".into(),
-                        )),
-                        source: Some("lokalize".into()),
-                        message: format!(
-                            "Key `{}` is missing from source locale `{}`",
-                            u.key, source
-                        ),
-                        ..Default::default()
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
+    let is_locale = is_indexed_locale_uri(index, uri).await;
+    let diagnostics = if is_locale {
+        // Locale path always returns a vec (possibly empty) so we can
+        // clear stale markers even when the buffer is mid-edit.
+        compute_locale_diagnostics(documents, index, usages, uri).await
+    } else {
+        match compute_source_diagnostics(index, &doc).await {
+            Some(d) => d,
+            None => return,
+        }
     };
 
     client
         .publish_diagnostics(uri.clone(), diagnostics, Some(doc.version))
         .await;
+}
+
+/// Build the source-side missing-key diagnostics for an open document.
+/// Returns `None` only if the locale index is not ready yet.
+async fn compute_source_diagnostics(
+    index: &IndexSlot,
+    doc: &DocumentState,
+) -> Option<Vec<Diagnostic>> {
+    let key_usages = find_usages(&doc.text, &doc.language_id);
+
+    let index_guard = index.read().await;
+    let idx = index_guard.as_ref()?;
+    let source = &idx.source_locale;
+    let out = key_usages
+        .into_iter()
+        .filter_map(|u| {
+            let values = idx.lookup(&u.key);
+            if values.is_empty() {
+                Some(Diagnostic {
+                    range: to_lsp_range(&u.range),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                        "missing-key".into(),
+                    )),
+                    source: Some("lokalize".into()),
+                    message: format!("Missing translation for key `{}`", u.key),
+                    ..Default::default()
+                })
+            } else if !values.contains_key(source) {
+                Some(Diagnostic {
+                    range: to_lsp_range(&u.range),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                        "missing-source".into(),
+                    )),
+                    source: Some("lokalize".into()),
+                    message: format!(
+                        "Key `{}` is missing from source locale `{}`",
+                        u.key, source
+                    ),
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    Some(out)
+}
+
+/// Build "unused translation" diagnostics for the locale file at `uri`.
+///
+/// Critically, this *re-parses the live buffer* (falling back to disk when
+/// the file isn't open) instead of reusing the cached [`LocaleIndex`].
+/// Without this, deleting a line — by hand or via the "Remove unused key"
+/// quickfix — leaves the HINT decoration glued to the old line until the
+/// watcher rebuilds the index from disk on save.
+///
+/// Always returns a vector (possibly empty) so the LSP can publish it
+/// unconditionally and clear stale markers, even on a parse error caused
+/// by an in-flight edit.
+async fn compute_locale_diagnostics(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    usages: &UsageSlot,
+    uri: &Url,
+) -> Vec<Diagnostic> {
+    let Ok(path) = uri.to_file_path() else {
+        return Vec::new();
+    };
+
+    // Live buffer wins over disk so ranges follow the user's edits.
+    let source = match documents.read().await.get(uri).map(|d| d.text.clone()) {
+        Some(t) => t,
+        None => match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        },
+    };
+
+    // Mid-typing JSON is often invalid; rather than freezing the previous
+    // diagnostic positions, return an empty list so the editor clears.
+    let entries = match i18n_core::parser::parse_with_extension(&source, &path) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let usages_guard = usages.read().await;
+    // Until the project-wide source scan has at least one file recorded,
+    // every key would look unused. Suppress the diagnostic in that
+    // transient state to avoid a flash of "all keys unused" on cold start.
+    if usages_guard.file_count() == 0 {
+        return Vec::new();
+    }
+
+    let index_guard = index.read().await;
+    let Some(idx) = index_guard.as_ref() else {
+        return Vec::new();
+    };
+    let Some(locale_file) = idx.files.iter().find(|f| f.path == path) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let key = idx.compose_full_key(locale_file, &entry.key_path);
+        if usages_guard.is_key_used(&key) {
+            continue;
+        }
+        out.push(Diagnostic {
+            range: to_lsp_range(&entry.key_range),
+            severity: Some(DiagnosticSeverity::HINT),
+            tags: Some(vec![tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY]),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "unused-key".into(),
+            )),
+            source: Some("lokalize".into()),
+            message: format!(
+                "Translation key `{key}` is not referenced by any scanned source file."
+            ),
+            ..Default::default()
+        });
+    }
+    out
+}
+
+async fn is_indexed_locale_uri(index: &IndexSlot, uri: &Url) -> bool {
+    let Ok(path) = uri.to_file_path() else {
+        return false;
+    };
+    let guard = index.read().await;
+    guard
+        .as_ref()
+        .map(|idx| idx.files.iter().any(|f| f.path == path))
+        .unwrap_or(false)
 }
 
 // ---------- Helpers ----------
@@ -637,6 +844,84 @@ async fn build_fill_missing_actions(
     actions
 }
 
+/// Build code actions for a cursor position inside a locale JSON file.
+///
+/// Currently the only locale-side action is "Remove unused key": when the
+/// cursor sits on a key whose dotted name is absent from the
+/// [`UsageIndex`], we propose a [`WorkspaceEdit`] that removes the entry
+/// and prunes any namespace that becomes empty as a result.
+///
+/// The buffer is re-parsed on demand so the cursor-to-key match always
+/// uses ranges that line up with what the user currently sees, including
+/// unsaved edits.
+async fn build_locale_code_actions(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    usages: &UsageSlot,
+    uri: &Url,
+    pos: LspPosition,
+) -> Option<CodeActionResponse> {
+    let path = uri.to_file_path().ok()?;
+
+    let buffer = documents.read().await.get(uri).map(|d| d.text.clone())?;
+    let entries = i18n_core::parser::parse_with_extension(&buffer, &path).ok()?;
+    let entry = entries
+        .into_iter()
+        .find(|e| range_contains_position(&e.key_range, pos))?;
+
+    let full_key = {
+        let guard = index.read().await;
+        let idx = guard.as_ref()?;
+        let locale_file = idx.files.iter().find(|f| f.path == path)?;
+        idx.compose_full_key(locale_file, &entry.key_path)
+    };
+
+    if usages.read().await.is_key_used(&full_key) {
+        return None;
+    }
+
+    let path_refs: Vec<&str> = entry.key_path.iter().map(String::as_str).collect();
+    let new_content = match remove_key_json(&buffer, &path_refs) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(path = %path.display(), "remove_key_json failed: {e}");
+            return None;
+        }
+    };
+
+    let range = whole_file_range(&buffer);
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range,
+            new_text: new_content,
+        }],
+    );
+
+    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+    Some(vec![CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Lokalize: Remove unused key `{full_key}` from `{filename}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })])
+}
+
+/// True iff `pos` lies inside `range`. Uses the LSP convention of half-open
+/// ranges (end is exclusive in LSP, but for cursor-on-token UX we accept
+/// equality on either side — the user's caret often lands at the boundary
+/// of the property name they meant to interact with).
+fn range_contains_position(range: &i18n_core::Range, pos: LspPosition) -> bool {
+    let start = (range.start.line, range.start.character);
+    let end = (range.end.line, range.end.character);
+    let p = (pos.line, pos.character);
+    start <= p && p <= end
+}
+
 /// Walk progressively shorter prefixes of `key` and return a `LocalizedValue`
 /// for any leaf that shares a prefix. Used to locate the target file when
 /// the key itself doesn't exist in any locale yet.
@@ -807,6 +1092,7 @@ fn collect_workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
 async fn build_indexes_for_roots(
     roots: Vec<PathBuf>,
     index_slot: IndexSlot,
+    usage_slot: UsageSlot,
     documents: DocumentStore,
     client: Client,
     watcher_slot: WatcherSlot,
@@ -820,11 +1106,49 @@ async fn build_indexes_for_roots(
                     .log_message(MessageType::INFO, format!("Lokalize: {summary}"))
                     .await;
                 *index_slot.write().await = Some(index);
+
+                // Walk the project for source-code translation usages. Done
+                // after the locale index is in place so the first published
+                // diagnostic round can already see both sides.
+                let scan_root = root.clone();
+                let scan_slot = Arc::clone(&usage_slot);
+                let scan_index = Arc::clone(&index_slot);
+                let scan_documents = Arc::clone(&documents);
+                let scan_client = client.clone();
+                tokio::spawn(async move {
+                    let usages = tokio::task::spawn_blocking(move || {
+                        UsageIndex::build_from_project(&scan_root)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    let summary = format!(
+                        "scanned {} source file(s) for {} key reference(s)",
+                        usages.file_count(),
+                        usages.total_usages(),
+                    );
+                    info!("{summary}");
+                    scan_client
+                        .log_message(MessageType::INFO, format!("Lokalize: {summary}"))
+                        .await;
+                    *scan_slot.write().await = usages;
+                    // Now that the reverse index is populated, push fresh
+                    // diagnostics to every open document so unused-key
+                    // markers appear without waiting for the next edit.
+                    republish_all_diagnostics(
+                        &scan_documents,
+                        &scan_index,
+                        &scan_slot,
+                        &scan_client,
+                    )
+                    .await;
+                });
+
                 // Phase 1: stop at the first workspace root that yields an index,
                 // and start watching it for hot reload.
                 tokio::spawn(start_watcher(
                     root,
                     Arc::clone(&index_slot),
+                    Arc::clone(&usage_slot),
                     documents,
                     client,
                     watcher_slot,
@@ -878,6 +1202,7 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 async fn start_watcher(
     root: PathBuf,
     index_slot: IndexSlot,
+    usage_slot: UsageSlot,
     documents: DocumentStore,
     client: Client,
     watcher_slot: WatcherSlot,
@@ -941,7 +1266,7 @@ async fn start_watcher(
                     )
                     .await;
                 *index_slot.write().await = Some(index);
-                republish_all_diagnostics(&documents, &index_slot, &client).await;
+                republish_all_diagnostics(&documents, &index_slot, &usage_slot, &client).await;
                 // Inlay hints follow a pull model: the editor only re-fetches
                 // them when we ask it to. Without this, inlay hints keep
                 // showing stale translations until the user edits the buffer.
@@ -973,11 +1298,12 @@ fn is_locale_file(p: &Path) -> bool {
 async fn republish_all_diagnostics(
     documents: &DocumentStore,
     index: &IndexSlot,
+    usages: &UsageSlot,
     client: &Client,
 ) {
     let uris: Vec<Url> = documents.read().await.keys().cloned().collect();
     for uri in uris {
-        publish_diagnostics_for(documents, index, client, &uri).await;
+        publish_diagnostics_for(documents, index, usages, client, &uri).await;
     }
 }
 
@@ -1022,6 +1348,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         index: Arc::new(RwLock::new(None)),
+        usages: Arc::new(RwLock::new(UsageIndex::new())),
         documents: Arc::new(RwLock::new(HashMap::new())),
         _watcher: Arc::new(StdMutex::new(None)),
     });

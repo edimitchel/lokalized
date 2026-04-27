@@ -25,7 +25,13 @@ pub enum ParseError {
 pub struct LocaleEntry {
     pub key_path: Vec<String>,
     pub value: String,
+    /// Range of the *value* literal in the source (inside its quotes for JSON).
+    /// Used by hover and go-to-definition to point at the translation text.
     pub range: Range,
+    /// Range of the *leaf key* identifier (the property name leading to this
+    /// value). Used by diagnostics that decorate the key itself, e.g. unused
+    /// translations.
+    pub key_range: Range,
 }
 
 pub trait LocaleParser {
