@@ -28,7 +28,8 @@ use tower_lsp::lsp_types::{
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
     MessageType, OneOf, Position as LspPosition, Range as LspRange, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Url, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
@@ -111,6 +112,7 @@ impl LanguageServer for Backend {
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -371,6 +373,75 @@ impl LanguageServer for Backend {
             .collect();
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    /// Workspace-wide fuzzy search over translation keys (Zed: Cmd+T).
+    ///
+    /// Each match yields a [`SymbolInformation`] pointing at the key's
+    /// definition in the source locale (or any locale that defines it),
+    /// so jumping straight to the JSON entry from the picker works.
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.trim().to_string();
+        info!(query = %query, "workspace/symbol request");
+
+        let guard = self.index.read().await;
+        let Some(idx) = &*guard else {
+            return Ok(None);
+        };
+
+        // Case-insensitive substring match. Zed runs its own fuzzy match on
+        // the returned list so a permissive server-side filter is enough.
+        let needle = query.to_lowercase();
+        let source = &idx.source_locale;
+        let max_results = 200_usize;
+
+        let mut symbols: Vec<SymbolInformation> = Vec::new();
+        for key in idx.all_keys() {
+            if !needle.is_empty() && !key.to_lowercase().contains(&needle) {
+                continue;
+            }
+            let values = idx.lookup(&key);
+            if values.is_empty() {
+                continue;
+            }
+            // Prefer the source locale so the picker preview shows the
+            // canonical translation. Fall back to whichever locale has it.
+            let value = values
+                .get(source)
+                .copied()
+                .or_else(|| values.values().next().copied());
+            let Some(value) = value else { continue };
+
+            let Ok(uri) = Url::from_file_path(&value.file) else {
+                continue;
+            };
+
+            #[allow(deprecated)] // SymbolInformation::deprecated is itself deprecated
+            symbols.push(SymbolInformation {
+                name: key,
+                kind: SymbolKind::KEY,
+                tags: None,
+                deprecated: None,
+                location: Location {
+                    uri,
+                    range: to_lsp_range(&value.key_range),
+                },
+                container_name: None,
+            });
+            if symbols.len() >= max_results {
+                break;
+            }
+        }
+
+        info!(
+            count = symbols.len(),
+            "workspace/symbol responding with {} match(es)",
+            symbols.len()
+        );
+        Ok(Some(symbols))
     }
 }
 

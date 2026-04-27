@@ -142,8 +142,10 @@ lokalize-vue/
   - [x] clé utilisée mais absente de toutes les locales → WARNING `missing-key`
   - [x] clé utilisée mais absente de la source locale → INFO `missing-source`
   - [ ] valeur vide dans une locale (Phase 3.5)
-  - [ ] clé inutilisée (scan global, sur le fichier de locale) (Phase 3.5)
-- [ ] **Workspace Symbol** : fuzzy match sur toutes les clés (Phase 3.5)
+  - [x] **clé inutilisée** (scan global → HINT/UNNECESSARY sur le fichier de locale,
+        re-parse buffer pour ranges live, code action "Remove unused key")
+- [x] **Workspace Symbol** : fuzzy match sur toutes les clés (Cmd+T → SymbolInformation
+      pointant la `key_range` source-locale, cap 200 résultats)
 
 ### Config workspace
 
@@ -275,6 +277,99 @@ lokalize-vue/
 | Binaire LSP multi-plateforme | CI matrix + GitHub Releases + téléchargement conditionnel |
 | Perf sur gros monorepo | Indexation parallèle, cache disque, watcher incrémental |
 | Concurrence `intl-lens` | Positionnement Vue/Nuxt-first + features avancées (MCP, refactor) |
+
+---
+
+## Phase 8 — UX panneau & veille Zed Extensions API
+
+> Section ajoutée le 27 avril 2026 après recherche sur les annonces Zed
+> concernant l'élargissement de la surface des extensions.
+
+### État de la plateforme Zed (avril 2026)
+
+Aucune API publique pour panneau interactif, webview, sidebar custom ou status
+bar item depuis une extension. Confirmé par :
+
+- [Roadmap Zed officiel](https://zed.dev/roadmap) : item "Extensions API"
+  listé en *non-démarré* sans timeline. Description publique : *"Make it
+  easier to create extensions for Zed."*
+- [Capabilities doc](https://zed.dev/docs/extensions/capabilities) : seules
+  capabilities exposées = `process:exec`, `download_file`, `npm:install`.
+- Page [OpenCode extension](https://zed.dev/extensions/opencode) — Zed
+  affirme : *"In the future, we plan on increasing the extension surface to
+  allow you to customize Zed's UI and more."*
+- [Issue #21208](https://github.com/zed-industries/zed/issues/21208)
+  "Webview via Extensions" — ouverte, sans réponse officielle.
+- [Issue #21400](https://github.com/zed-industries/zed/issues/21400)
+  "Customizable Side Panels" — **closed as unactionable**.
+- Témoignage `git-graph-zed` : *"There is no public way for an extension to
+  register a persistent panel, spawn a WebView, or auto-open UI when the
+  extension loads."*
+
+### RFC à surveiller
+
+[Discussion #53403 "RFC: Visual Extension API"](https://github.com/zed-industries/zed/discussions/53403)
+— draft du 8 avril 2026 par un contributeur externe. Pas encore validée par
+l'équipe Zed. Décisions tech proposées :
+
+- **GPUI natif, pas de webview** (rejet motivé : *"Heavy, slow, inconsistent
+  UX, security risks"*).
+- API WIT pour `panel`, `components`, `status-bar`, mise à jour du trait
+  `Extension`.
+- Roadmap en 4 phases :
+
+  | Phase | Scope | Effort estimé |
+  |---|---|---|
+  | 1 | Status bar items | 1-2 semaines |
+  | 2 | Simple panels (read-only) | 3-4 semaines |
+  | 3 | **Interactive panels** (citation : *"i18n editor, DB browser"*) | 6-8 semaines |
+  | 4 | Advanced components (charts, custom rendering) | 2-3 mois |
+
+Notre cas d'usage est **explicitement nommé** comme cible Phase 3.
+
+### Implications pour Lokalize
+
+- **Court terme** : pas de panneau possible, on reste sur LSP + slash commands
+  + MCP. Architecture actuelle (logique pure dans `i18n-core`, façade LSP fine)
+  est compatible : si l'API panneau sort, on ajoute une crate `panel-extension`
+  qui consomme `i18n-core` et expose l'API WIT.
+- **Moyen terme** : si Phase 1 sort, on peut afficher un status bar item
+  *"Lokalize: 32 missing in fr"*.
+- **Long terme** : Phase 3 ouvrirait un vrai concurrent d'i18n-ally VSCode
+  (édition inline, tableaux par locale, bulk ops).
+- **Risque** : le RFC peut traîner / être rejeté. **Aucune garantie**. Plan B
+  robuste = continuer à investir MCP + slash commands.
+
+### Substituts Zed-only à implémenter dès maintenant
+
+Ordre recommandé (effort / valeur croissants) :
+
+- [ ] **Document Symbols** (`textDocument/documentSymbol`) sur fichiers locale
+      → mini-tree-view dans la sidebar Outline de Zed, fuzzy via Cmd+Shift+O.
+      ~1h. Quick win.
+- [ ] **Slash commands ciblés** dans l'Assistant : `/lokalize-missing`,
+      `/lokalize-stats`, `/lokalize-unused`. Avec
+      `complete_slash_command_argument` pour autocomplete des clés.
+- [ ] **Buffer virtuel "dashboard"** généré à la demande : Markdown navigable
+      avec liens `file://` cliquables (tableau de complétude par locale,
+      listes missing/unused, etc.). Persistant en background tab.
+- [ ] **MCP server** avec outils riches (`i18n.list_keys`, `i18n.translate_key`,
+      `i18n.set_value`, etc.) — déjà au plan **Phase 5**, c'est notre vraie
+      surface UI riche aujourd'hui.
+
+Combinés, ces 4 surfaces couvrent ~80% des use cases d'i18n-ally VSCode sans
+attendre l'API panneau.
+
+### Actions conditionnelles (à activer selon évolution Zed)
+
+- [ ] **Si Phase 1 du RFC mergée** → ajouter status bar item compteur.
+- [ ] **Si Phase 2 mergée** → panneau read-only listant les clés par locale,
+      filtrable (missing / unused / empty).
+- [ ] **Si Phase 3 mergée** → édition inline des traductions, tableaux,
+      bulk ops. C'est là qu'on rattrape i18n-ally VSCode.
+- [ ] Watcher : abonnement notifications GitHub sur
+      [discussion #53403](https://github.com/zed-industries/zed/discussions/53403)
+      pour suivre l'évolution.
 
 ---
 
