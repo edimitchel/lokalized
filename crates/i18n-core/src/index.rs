@@ -66,6 +66,10 @@ pub struct LocaleIndex {
     pub files: Vec<LocaleFile>,
     pub layout: Option<LocaleLayout>,
     pub source_locale: Locale,
+    /// Snapshot of the project configuration the index was built with. Kept
+    /// on the index so downstream consumers (code actions, diagnostics) can
+    /// see exactly what semantics were applied without reloading the file.
+    pub config: ProjectConfig,
 }
 
 impl LocaleIndex {
@@ -206,6 +210,7 @@ impl<'a> IndexBuilder<'a> {
             files,
             layout: Some(layout),
             source_locale,
+            config: self.config.clone(),
         })
     }
 

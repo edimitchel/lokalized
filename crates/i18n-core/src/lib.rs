@@ -8,6 +8,7 @@ pub mod display;
 pub mod framework;
 pub mod index;
 pub mod locale;
+pub mod mutation;
 pub mod parser;
 pub mod position;
 
@@ -16,6 +17,7 @@ pub use display::{escape_md, truncate_chars, ParsedValue};
 pub use framework::{find_usages, Framework, KeyUsage, BUILTIN_FRAMEWORKS};
 pub use index::{IndexBuilder, IndexError, KeyNode, KeyTree, LocaleIndex, LocalizedValue};
 pub use locale::{Locale, LocaleFile, LocaleLayout};
+pub use mutation::{detect_indent, insert_key_json, MutationError};
 pub use parser::{parse_file, LocaleEntry, LocaleParser, ParseError};
 pub use position::{LineIndex, Position, Range};
 

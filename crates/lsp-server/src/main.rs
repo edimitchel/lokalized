@@ -12,21 +12,22 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use i18n_core::{
-    escape_md, find_usages, truncate_chars, IndexBuilder, KeyUsage, LineIndex, LocaleIndex,
-    LocalizedValue, ParsedValue, ProjectConfig,
+    escape_md, find_usages, insert_key_json, truncate_chars, IndexBuilder, KeyUsage, LineIndex,
+    LocaleFile, LocaleIndex, LocaleLayout, LocalizedValue, ParsedValue, ProjectConfig,
 };
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CompletionItem,
-    CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
-    MarkupContent, MarkupKind, MessageType, OneOf, Position as LspPosition, Range as LspRange,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
+    CodeActionResponse, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
+    CompletionResponse, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ExecuteCommandParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    MessageType, OneOf, Position as LspPosition, Range as LspRange, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
@@ -248,17 +249,36 @@ impl LanguageServer for Backend {
 
     async fn code_action(
         &self,
-        _params: CodeActionParams,
+        params: CodeActionParams,
     ) -> Result<Option<CodeActionResponse>> {
-        // Phase 4 will populate this handler with `WorkspaceEdit`-based actions
-        // (Fill missing, Extract to key, Rename). "Go to <locale>" actions
-        // were deliberately removed because Zed currently ignores
-        // `window/showDocument` for local `file://` URIs — see
-        // https://github.com/zed-industries/zed/discussions/53123. F12
-        // (goto-definition) already offers a multi-location picker and the
-        // hover popup exposes clickable file links, covering the navigation
-        // use-case via pure-LSP features that Zed does support.
-        Ok(None)
+        let uri = params.text_document.uri;
+        let pos = params.range.start;
+        info!(%uri, line = pos.line, character = pos.character, "code_action request");
+
+        let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
+            info!("code_action: no document state");
+            return Ok(None);
+        };
+        let Some(usage) = usage_at_position(&doc, pos) else {
+            info!("code_action: no usage at position");
+            return Ok(None);
+        };
+        info!(key = %usage.key, "code_action: usage found");
+
+        let index_guard = self.index.read().await;
+        let Some(idx) = &*index_guard else {
+            info!("code_action: no index");
+            return Ok(None);
+        };
+
+        let actions = build_fill_missing_actions(idx, &usage.key).await;
+        info!(count = actions.len(), "code_action: built actions");
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn execute_command(
@@ -506,6 +526,255 @@ fn format_hover_markdown(
     md.push_str("\n*Press `F12` to jump to a translation in a picker.*");
 
     md
+}
+
+// ---------- Code-action builders (Phase 4) ----------
+
+/// Build one "Create key in <locale>.json" action per locale missing `key`.
+///
+/// Strategy:
+/// 1. Look at every locale the project knows about. Skip the ones that
+///    already have the key.
+/// 2. For each missing locale, find the file that mirrors the one where
+///    the key is currently defined (same namespace, different locale).
+///    If we can't figure out where to insert, skip that locale silently.
+/// 3. Apply `insert_key_json` to its current contents and wrap the result
+///    in a `WorkspaceEdit` that replaces the whole file.
+async fn build_fill_missing_actions(
+    idx: &LocaleIndex,
+    key: &str,
+) -> Vec<CodeActionOrCommand> {
+    let values = idx.lookup(key);
+    // Pick a reference value (source locale preferred, else any).
+    let reference_value: String = values
+        .get(&idx.source_locale)
+        .copied()
+        .or_else(|| values.values().next().copied())
+        .map(|v| v.value.clone())
+        .unwrap_or_else(|| humanize_key(key));
+
+    // Identify the source `LocaleFile` so we can look up the sibling file in
+    // each missing locale. Falls back to a sibling-prefix lookup for keys
+    // that don't exist anywhere yet (first-time authoring).
+    let source_value = values
+        .values()
+        .next()
+        .copied()
+        .or_else(|| find_reference_value(idx, key));
+    let source_file: Option<&LocaleFile> =
+        source_value.and_then(|v| idx.files.iter().find(|f| f.path == v.file));
+
+    // Every locale present in the project.
+    let all_locales: Vec<&i18n_core::Locale> = idx.trees.keys().collect();
+    let mut missing: Vec<&i18n_core::Locale> = all_locales
+        .iter()
+        .copied()
+        .filter(|l| !values.contains_key(l))
+        .collect();
+    missing.sort_by_key(|l| l.to_string());
+
+    let layout = idx.layout.unwrap_or(LocaleLayout::Nested);
+
+    let mut actions = Vec::new();
+    for locale in missing {
+        let Some(source) = source_file else {
+            continue;
+        };
+        let Some(target) = find_target_file(idx, source, locale) else {
+            continue;
+        };
+
+        let Ok(content) = std::fs::read_to_string(&target.path) else {
+            warn!(path = %target.path.display(), "could not read target locale file");
+            continue;
+        };
+
+        // Key path relative to the JSON root of the target file.
+        let path_segments =
+            key_path_in_file(key, target.namespace.as_deref(), layout, idx);
+        if path_segments.is_empty() {
+            continue;
+        }
+        let path_refs: Vec<&str> = path_segments.iter().map(|s| s.as_str()).collect();
+
+        let new_content = match insert_key_json(&content, &path_refs, &reference_value) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(path = %target.path.display(), "insert_key_json failed: {e}");
+                continue;
+            }
+        };
+
+        let Ok(target_uri) = Url::from_file_path(&target.path) else {
+            continue;
+        };
+        let range = whole_file_range(&content);
+        let mut changes = HashMap::new();
+        changes.insert(
+            target_uri,
+            vec![TextEdit {
+                range,
+                new_text: new_content,
+            }],
+        );
+
+        let filename = target
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Lokalize: Create `{key}` in {locale} (`{filename}`)"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+
+    actions
+}
+
+/// Walk progressively shorter prefixes of `key` and return a `LocalizedValue`
+/// for any leaf that shares a prefix. Used to locate the target file when
+/// the key itself doesn't exist in any locale yet.
+///
+/// Example: looking up `global.zzzNewKey` will find any existing key under
+/// `global.*` (e.g. `global.numberOfDisplayedElements`) and return it so the
+/// caller can derive the target file from its path.
+fn find_reference_value<'a>(
+    idx: &'a LocaleIndex,
+    key: &str,
+) -> Option<&'a LocalizedValue> {
+    let segments: Vec<&str> = key.split('.').collect();
+    for n in (1..segments.len()).rev() {
+        for tree in idx.trees.values() {
+            if let Some(v) = first_leaf_under(tree, &segments[..n]) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Navigate `tree` down `prefix` and return the first `Leaf` found under the
+/// matching subtree (DFS). Returns `None` if the prefix isn't reachable.
+fn first_leaf_under<'a>(
+    tree: &'a i18n_core::KeyTree,
+    prefix: &[&str],
+) -> Option<&'a LocalizedValue> {
+    let mut current = tree;
+    for seg in prefix {
+        match current.children.get(*seg)? {
+            i18n_core::KeyNode::Branch(sub) => current = sub,
+            i18n_core::KeyNode::Leaf(v) => return Some(v),
+        }
+    }
+    first_leaf_in(current)
+}
+
+fn first_leaf_in(tree: &i18n_core::KeyTree) -> Option<&LocalizedValue> {
+    for node in tree.children.values() {
+        match node {
+            i18n_core::KeyNode::Leaf(v) => return Some(v),
+            i18n_core::KeyNode::Branch(sub) => {
+                if let Some(v) = first_leaf_in(sub) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find the file in `target_locale` whose namespace matches `source`'s.
+/// Falls back to the sole file if the target locale only has one.
+fn find_target_file<'a>(
+    idx: &'a LocaleIndex,
+    source: &LocaleFile,
+    target_locale: &i18n_core::Locale,
+) -> Option<&'a LocaleFile> {
+    if let Some(sibling) = idx
+        .files
+        .iter()
+        .find(|f| f.locale == *target_locale && f.namespace == source.namespace)
+    {
+        return Some(sibling);
+    }
+    // Fallback: flat layout without namespaces.
+    let mut in_locale = idx.files.iter().filter(|f| f.locale == *target_locale);
+    let first = in_locale.next();
+    match in_locale.next() {
+        Some(_) => None, // ambiguous
+        None => first,
+    }
+}
+
+/// Compute the dot-path of `key` *relative to the JSON root of the target file*.
+///
+/// Two semantics, controlled by `config.namespace`:
+///
+/// - **Nested + `namespace: true`** (default, i18n-ally style) — the indexer
+///   prepended the filename stem to every key, so the stored path already
+///   includes the namespace. The JSON file itself, however, does *not* start
+///   with a `{ stem: {...} }` wrapper, so we must strip the first segment
+///   before writing.
+/// - **Nested + `namespace: false`** — the JSON is self-wrapped
+///   (`{"slots": {...}}`) and the indexer stored keys exactly as they appear.
+///   No stripping: the full key navigates into the JSON as-is.
+/// - **Flat layout** — the JSON holds every top-level key; no stripping.
+fn key_path_in_file(
+    key: &str,
+    file_namespace: Option<&str>,
+    layout: LocaleLayout,
+    idx: &LocaleIndex,
+) -> Vec<String> {
+    let segments: Vec<String> = key.split('.').map(str::to_string).collect();
+    if layout != LocaleLayout::Nested {
+        return segments;
+    }
+    let Some(ns) = file_namespace else {
+        return segments;
+    };
+    // Strip only when the indexer explicitly prepended the namespace.
+    // `config.namespace` is the source of truth here — the tree structure
+    // alone cannot distinguish `namespace: true` from `namespace: false`
+    // because both end up with `{ns: {...}}` at the top.
+    if idx.config.use_file_namespace() && segments.first().map(String::as_str) == Some(ns) {
+        return segments.into_iter().skip(1).collect();
+    }
+    segments
+}
+
+fn whole_file_range(content: &str) -> LspRange {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let last_line_len = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+    LspRange {
+        start: LspPosition {
+            line: 0,
+            character: 0,
+        },
+        end: LspPosition {
+            line: (lines.len().saturating_sub(1)) as u32,
+            character: last_line_len as u32,
+        },
+    }
+}
+
+/// Turn `some.nested.myKey` into a human-friendly placeholder: `my key`.
+fn humanize_key(key: &str) -> String {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    // camelCase / PascalCase → space-separated.
+    let mut out = String::with_capacity(last.len());
+    for (i, ch) in last.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
 }
 
 /// Extract filesystem paths for every `workspace_folder` advertised by the client,
