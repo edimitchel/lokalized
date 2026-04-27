@@ -27,9 +27,9 @@ use tower_lsp::lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, OneOf, Position as LspPosition, Range as LspRange, ServerCapabilities, ServerInfo,
-    SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Url, WorkspaceEdit, WorkspaceSymbolParams,
+    MessageType, OneOf, Position as LspPosition, Range as LspRange, ReferenceParams,
+    ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
@@ -113,6 +113,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -222,6 +223,21 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
+
+        // Locale JSON files get a `· N usages` hint after each key, fed by
+        // the project-wide UsageIndex.
+        if is_indexed_locale_uri(&self.index, &uri).await {
+            let hints = compute_locale_inlay_hints(
+                &self.documents,
+                &self.index,
+                &self.usages,
+                &uri,
+            )
+            .await;
+            info!(uri = %uri, hints = hints.len(), "inlay_hint (locale)");
+            return Ok(Some(hints));
+        }
+
         let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
         };
@@ -283,6 +299,66 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(GotoDefinitionResponse::Array(locations)))
         }
+    }
+
+    /// `textDocument/references` for a translation key.
+    ///
+    /// Works in both directions:
+    /// - cursor on a `t("foo.bar")` call site → list every other call site
+    /// - cursor on a key inside a locale JSON → list every call site
+    ///
+    /// When the client requests `include_declaration`, the locale-side
+    /// definition(s) are appended so Zed's "Find All References" panel
+    /// shows both the JSON entry and the source usages in one list.
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        info!(%uri, line = pos.line, character = pos.character, "references request");
+
+        let Some(key) =
+            key_under_cursor(&self.documents, &self.index, &uri, pos).await
+        else {
+            info!("references: no key at cursor");
+            return Ok(None);
+        };
+
+        // Source-side usages first; this is the data the user usually wants.
+        let usages_guard = self.usages.read().await;
+        let mut locations: Vec<Location> = usages_guard
+            .locations_for_key(&key)
+            .into_iter()
+            .filter_map(|(path, range)| {
+                Url::from_file_path(path).ok().map(|file_uri| Location {
+                    uri: file_uri,
+                    range: to_lsp_range(range),
+                })
+            })
+            .collect();
+        drop(usages_guard);
+
+        // Append locale-side declarations as a courtesy when asked. Zed's
+        // default "Find All References" sets include_declaration=true.
+        if params.context.include_declaration {
+            let index_guard = self.index.read().await;
+            if let Some(idx) = &*index_guard {
+                for value in idx.lookup(&key).values() {
+                    if let Ok(file_uri) = Url::from_file_path(&value.file) {
+                        locations.push(Location {
+                            uri: file_uri,
+                            range: to_lsp_range(&value.key_range),
+                        });
+                    }
+                }
+            }
+        }
+
+        info!(
+            count = locations.len(),
+            key = %key,
+            "references responding with {} location(s)",
+            locations.len()
+        );
+        Ok(Some(locations))
     }
 
     async fn code_action(
@@ -697,6 +773,108 @@ fn localized_value_to_location(v: &LocalizedValue) -> Option<Location> {
         uri,
         range: to_lsp_range(&v.range),
     })
+}
+
+/// Resolve the translation key the user's cursor is currently on.
+///
+/// Two modes:
+/// - **Source file**: scan the buffer for translation calls and return the
+///   key whose literal range contains `pos`.
+/// - **Locale JSON**: parse the buffer to JSON entries and reconstruct the
+///   full dotted key from the entry whose key range contains `pos`.
+async fn key_under_cursor(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    uri: &Url,
+    pos: LspPosition,
+) -> Option<String> {
+    if is_indexed_locale_uri(index, uri).await {
+        let path = uri.to_file_path().ok()?;
+        let buffer = documents.read().await.get(uri).map(|d| d.text.clone())?;
+        let entries = i18n_core::parser::parse_with_extension(&buffer, &path).ok()?;
+        let entry = entries
+            .into_iter()
+            .find(|e| range_contains_position(&e.key_range, pos))?;
+        let guard = index.read().await;
+        let idx = guard.as_ref()?;
+        let file = idx.files.iter().find(|f| f.path == path)?;
+        Some(idx.compose_full_key(file, &entry.key_path))
+    } else {
+        let doc = documents.read().await.get(uri).cloned()?;
+        usage_at_position(&doc, pos).map(|u| u.key)
+    }
+}
+
+/// Build the per-key occurrence-count inlay hints for a locale file.
+///
+/// Re-parses the live buffer so ranges follow the user's edits. Skips keys
+/// with zero references — those are already flagged by the
+/// `unused-key` HINT diagnostic, no need to duplicate the signal.
+async fn compute_locale_inlay_hints(
+    documents: &DocumentStore,
+    index: &IndexSlot,
+    usages: &UsageSlot,
+    uri: &Url,
+) -> Vec<InlayHint> {
+    let Ok(path) = uri.to_file_path() else {
+        return Vec::new();
+    };
+    let Some(buffer) = documents.read().await.get(uri).map(|d| d.text.clone()) else {
+        return Vec::new();
+    };
+    let entries = match i18n_core::parser::parse_with_extension(&buffer, &path) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let index_guard = index.read().await;
+    let Some(idx) = index_guard.as_ref() else {
+        return Vec::new();
+    };
+    let Some(locale_file) = idx.files.iter().find(|f| f.path == path) else {
+        return Vec::new();
+    };
+
+    let usages_guard = usages.read().await;
+    // Pre-scan complete: until then, every count would be 0 and we'd emit
+    // nothing useful anyway.
+    if usages_guard.file_count() == 0 {
+        return Vec::new();
+    }
+    let counts = usages_guard.counts_by_key();
+
+    let mut hints = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = idx.compose_full_key(locale_file, &entry.key_path);
+        let count = counts.get(key.as_str()).copied().unwrap_or(0);
+        if count == 0 {
+            // Already surfaced by the unused-key diagnostic; avoid noise.
+            continue;
+        }
+        hints.push(InlayHint {
+            position: to_lsp_position(&entry.key_range.end),
+            label: InlayHintLabel::String(format_count_label(count)),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(format!(
+                "`{key}` is referenced {count} time(s) in scanned source files",
+            ))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        });
+    }
+    hints
+}
+
+/// Compact label for the per-key occurrence inlay hint. Singular vs plural
+/// is the only variation users notice.
+fn format_count_label(count: usize) -> String {
+    if count == 1 {
+        " · 1 usage".to_string()
+    } else {
+        format!(" · {count} usages")
+    }
 }
 
 fn build_inlay_hint(usage: &KeyUsage, value: &LocalizedValue) -> InlayHint {

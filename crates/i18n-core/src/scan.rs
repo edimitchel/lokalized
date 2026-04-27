@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::framework::find_usages;
+use crate::framework::{find_usages, KeyUsage};
+use crate::position::Range;
 
 /// Directory names skipped during the initial project scan. Matches both
 /// JS/TS toolchains (`node_modules`, `.nuxt`, `.next`, …) and generic build
@@ -45,13 +46,17 @@ const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
     ".vscode",
 ];
 
-/// Reverse-index: source file → set of translation keys referenced in it.
+/// Reverse-index: source file → list of translation key usages in it.
+///
+/// Each usage carries the source range of the literal so we can power
+/// `textDocument/references` and the per-key occurrence count inlay hint
+/// directly from this index, without having to re-scan files on demand.
 ///
 /// Cheap to clone in tests; the LSP keeps a single instance behind an
 /// `RwLock` and mutates it incrementally.
 #[derive(Clone, Debug, Default)]
 pub struct UsageIndex {
-    per_file: HashMap<PathBuf, HashSet<String>>,
+    per_file: HashMap<PathBuf, Vec<KeyUsage>>,
 }
 
 impl UsageIndex {
@@ -85,18 +90,15 @@ impl UsageIndex {
         index
     }
 
-    /// Replace the recorded keys for `path` with whatever `content` contains.
+    /// Replace the recorded usages for `path` with whatever `content` contains.
     /// If the file has no detectable usages, the entry is removed entirely so
     /// `file_count()` stays accurate.
     pub fn update_file(&mut self, path: PathBuf, content: &str, language_id: &str) {
-        let keys: HashSet<String> = find_usages(content, language_id)
-            .into_iter()
-            .map(|u| u.key)
-            .collect();
-        if keys.is_empty() {
+        let usages = find_usages(content, language_id);
+        if usages.is_empty() {
             self.per_file.remove(&path);
         } else {
-            self.per_file.insert(path, keys);
+            self.per_file.insert(path, usages);
         }
     }
 
@@ -105,17 +107,56 @@ impl UsageIndex {
         self.per_file.remove(path);
     }
 
-    /// Borrowed view of every key referenced anywhere in the project.
+    /// Borrowed view of every key referenced anywhere in the project. Keys
+    /// referenced multiple times are reported once.
     pub fn used_keys(&self) -> HashSet<&str> {
         self.per_file
             .values()
-            .flat_map(|set| set.iter().map(String::as_str))
+            .flat_map(|usages| usages.iter().map(|u| u.key.as_str()))
             .collect()
     }
 
     /// Cheap membership check that avoids materialising the full union.
     pub fn is_key_used(&self, key: &str) -> bool {
-        self.per_file.values().any(|set| set.contains(key))
+        self.per_file
+            .values()
+            .any(|usages| usages.iter().any(|u| u.key == key))
+    }
+
+    /// Total number of references to `key` across every scanned file.
+    pub fn count_for_key(&self, key: &str) -> usize {
+        self.per_file
+            .values()
+            .map(|usages| usages.iter().filter(|u| u.key == key).count())
+            .sum()
+    }
+
+    /// Every (file, range) pair where `key` is referenced. The order is not
+    /// stable across calls (HashMap iteration), callers that need
+    /// determinism should sort.
+    pub fn locations_for_key<'a>(&'a self, key: &str) -> Vec<(&'a Path, &'a Range)> {
+        let mut out = Vec::new();
+        for (path, usages) in &self.per_file {
+            for u in usages {
+                if u.key == key {
+                    out.push((path.as_path(), &u.range));
+                }
+            }
+        }
+        out
+    }
+
+    /// Aggregate counts for every key in a single pass. Intended for
+    /// per-key inlay hints on a locale file: O(N) once instead of N×M
+    /// `count_for_key` calls.
+    pub fn counts_by_key(&self) -> HashMap<&str, usize> {
+        let mut out: HashMap<&str, usize> = HashMap::new();
+        for usages in self.per_file.values() {
+            for u in usages {
+                *out.entry(u.key.as_str()).or_insert(0) += 1;
+            }
+        }
+        out
     }
 
     pub fn file_count(&self) -> usize {
@@ -123,7 +164,7 @@ impl UsageIndex {
     }
 
     pub fn total_usages(&self) -> usize {
-        self.per_file.values().map(HashSet::len).sum()
+        self.per_file.values().map(Vec::len).sum()
     }
 }
 
@@ -232,5 +273,63 @@ mod tests {
         let idx = UsageIndex::build_from_project(dir.path());
         assert!(idx.is_key_used("app.key"));
         assert!(!idx.is_key_used("vendor.key"));
+    }
+
+    #[test]
+    fn count_for_key_includes_duplicates_within_a_file() {
+        let mut idx = UsageIndex::new();
+        idx.update_file(
+            PathBuf::from("/a.vue"),
+            r#"<template>{{ $t("common.submit") }}{{ $t("common.submit") }}</template>"#,
+            "Vue.js",
+        );
+        idx.update_file(
+            PathBuf::from("/b.vue"),
+            r#"<template>{{ $t("common.submit") }}</template>"#,
+            "Vue.js",
+        );
+        assert_eq!(idx.count_for_key("common.submit"), 3);
+        assert_eq!(idx.count_for_key("missing"), 0);
+    }
+
+    #[test]
+    fn locations_for_key_returns_each_occurrence() {
+        let mut idx = UsageIndex::new();
+        let p = PathBuf::from("/a.vue");
+        idx.update_file(
+            p.clone(),
+            r#"<template>{{ $t("a.x") }}{{ $t("a.x") }}{{ $t("b.y") }}</template>"#,
+            "Vue.js",
+        );
+        let xs = idx.locations_for_key("a.x");
+        assert_eq!(xs.len(), 2);
+        assert!(xs.iter().all(|(path, _)| *path == p.as_path()));
+        // Both ranges must be distinct so callers can produce two LSP
+        // Locations rather than collapsing them.
+        assert_ne!(xs[0].1.start.offset, xs[1].1.start.offset);
+
+        let ys = idx.locations_for_key("b.y");
+        assert_eq!(ys.len(), 1);
+
+        assert!(idx.locations_for_key("nope").is_empty());
+    }
+
+    #[test]
+    fn counts_by_key_aggregates_all_files_in_one_pass() {
+        let mut idx = UsageIndex::new();
+        idx.update_file(
+            PathBuf::from("/a.vue"),
+            r#"{{ $t("a.x") }}{{ $t("b.y") }}"#,
+            "Vue.js",
+        );
+        idx.update_file(
+            PathBuf::from("/b.vue"),
+            r#"{{ $t("a.x") }}{{ $t("a.x") }}"#,
+            "Vue.js",
+        );
+        let counts = idx.counts_by_key();
+        assert_eq!(counts.get("a.x"), Some(&3));
+        assert_eq!(counts.get("b.y"), Some(&1));
+        assert!(counts.get("missing").is_none());
     }
 }

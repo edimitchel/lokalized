@@ -126,17 +126,24 @@ lokalize-vue/
 - [x] inlayHintProvider
 - [x] definitionProvider
 - [x] completionProvider (trigger chars : `"`, `'`, `` ` ``, `.`)
-- [ ] referencesProvider (Phase 3.5)
-- [ ] codeActionProvider (Phase 4)
+- [x] **referencesProvider** (curseur sur usage source ou clé locale → toutes
+      les call-sites depuis `UsageIndex.locations_for_key`, + déclarations
+      locales si `include_declaration`)
+- [x] codeActionProvider (Phase 4 partiel : Fill missing, Remove unused)
 - [ ] renameProvider (Phase 4)
-- [ ] workspaceSymbolProvider (Phase 3.5)
+- [x] workspaceSymbolProvider
 - [ ] documentSymbolProvider (Phase 3.5)
 
 ### Handlers
 
 - [x] **Hover** : markdown listant toutes les locales (via `idx.lookup(key)`)
-- [x] **Inlay Hint** : ` = <traduction>` après chaque `t(…)`, tronquée à 40 chars
+- [x] **Inlay Hint** :
+  - sur source : ` = <traduction>` après chaque `t(…)`, tronquée à 40 chars
+  - sur locale JSON : ` · N usages` à droite de chaque clé, basé sur
+    `UsageIndex.counts_by_key()` (skip si N==0, le diagnostic UNNECESSARY couvre)
 - [x] **Definition** : liste de `Location` pointant chaque fichier de locale
+- [x] **References** : every call-site de la clé (source) + déclarations locales
+      si `include_declaration`. Curseur indifféremment sur source ou JSON.
 - [x] **Completion** : toutes les clés du projet avec preview source en `detail`
 - [x] **Diagnostics** push sur `didOpen` / `didChange` :
   - [x] clé utilisée mais absente de toutes les locales → WARNING `missing-key`
