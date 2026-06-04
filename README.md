@@ -167,24 +167,59 @@ For `lokalized-lsp` and `lokalized-mcp`, the extension tries in order:
 Registered for: Vue.js, TypeScript, TSX, JavaScript, JSX, HTML, JSON, JSONC, JSON5, YAML.
 
 - Inlay hints, hover, go-to-definition, references, completion
-- Diagnostics (missing keys, etc.)
+- Diagnostics (missing keys, broken `@:` links, unused keys)
 - Code actions (create key, remove unused key)
+- **Linked messages** (vue-i18n `@:other.key`, `@.lower:other.key`) — resolved previews, navigation, and alias references
 
-Enable inlay hints in Zed if needed:
+Enable inlay hints in Zed (all kinds — Lokalized hints are not filtered by type/parameter):
 
 ```json
 "inlay_hints": {
   "enabled": true,
+  "show_type_hints": true,
+  "show_parameter_hints": true,
   "show_other_hints": true
 }
 ```
+
+Put **Lokalized** first among language servers for Vue/TS/JSON so inlay hints are requested from this LSP (not only from Volar/TypeScript):
+
+```json
+"languages": {
+  "Vue.js": { "language_servers": ["lokalized", "..."] },
+  "JSON": { "language_servers": ["lokalized", "..."] }
+}
+```
+
+#### Linked messages (vue-i18n)
+
+Locale values can reference another key with [linked message syntax](https://vue-i18n.intlify.dev/guide/essentials/syntax#linked-messages):
+
+```json
+{
+  "global": {
+    "providers": { "payfip": "PayFiP" },
+    "payfip": "@:global.providers.payfip"
+  }
+}
+```
+
+Lokalized:
+
+- **Inlay hints / hover** show the resolved text (`PayFiP`) and the link target. In locale JSON files, a `→ PayFiP` hint appears after each `@:…` value (even before the source scan finishes).
+- **Go to definition** on a linked value (`@:…`) jumps to the target key’s locale entries.
+- **Find references** on a canonical key also lists alias keys that link to it.
+- **Diagnostics** warn when a link is broken (missing target, cycle, or chain too deep).
+- Modifiers `@.lower:`, `@.upper:`, `@.capitalize:` are applied in previews.
+
+Aliases are not flagged as “unused” when only the canonical key is referenced in source code.
 
 ### MCP tools (Agent)
 
 | Tool | Description |
 |------|-------------|
 | `i18n.list_keys` | List keys (optional locale, prefix filter). |
-| `i18n.get_value` | Read a key in a locale. |
+| `i18n.get_value` | Read a key in a locale (`value`, `resolved`, optional `link` / `linkError`). |
 | `i18n.set_value` | Write a value (JSON locales). |
 | `i18n.find_missing` | Keys in source locale missing from a target. |
 | `i18n.extract` | Propose a key from source text (planned behaviour). |
@@ -200,6 +235,14 @@ The MCP server receives the open project root as its first argument (and via `LO
 ### `failed to fetch GitHub release for edimitchel/lokalized`
 
 No release is published yet. Build and install binaries (see [Quick start](#2-install-native-binaries)), then reinstall the dev extension and restart Zed.
+
+### No inlay hints (Vue or JSON)
+
+1. Rebuild and install `lokalized-lsp`, then restart Zed (see [Quick start](#2-install-native-binaries)).
+2. In `settings.json`, enable all inlay hint kinds (see [Inlay Hints](#inlay-hints) above).
+3. Put `"lokalized"` first in `language_servers` for `Vue.js` and `JSON` — otherwise only Volar/TypeScript may run and Lokalized never receives inlay requests.
+4. Open the project **root** (e.g. MG_SHOP), not only `front/`.
+5. Check the log: `zed: open log` — you should see `Lokalized: indexed N locale(s)…` and `inlay_hint` lines with `hints > 0` on `global.json` or Vue files.
 
 ### No inlay hints / empty index
 

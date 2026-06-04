@@ -80,7 +80,7 @@ lokalized/
 - [x] `LocaleIndex` : `BTreeMap<Locale, KeyTree>` avec feuilles `{ value, file, range }`
 - [x] Support clés à plat (`a.b.c`) et imbriquées
 - [x] API de lookup multi-locale + `missing_keys` + `all_keys`
-- [ ] Support `linked messages` vue-i18n (`@:other.key`)
+- [x] Support `linked messages` vue-i18n (`@:other.key`, `@.lower:…`)
 - [ ] Index secondaire : `HashMap<Key, Vec<Location>>` pour go-to-def rapide
 
 ### Watcher (Phase 1.5)

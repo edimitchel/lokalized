@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::ProjectConfig;
 use crate::locale::{Locale, LocaleFile, LocaleLayout};
 use crate::parser::{parse_file, parse_with_extension, LocaleEntry, ParseError};
+use crate::paths::{normalize_path, paths_equal};
 use crate::position::Range;
 use crate::scan::UsageIndex;
 
@@ -73,7 +74,7 @@ impl KeyTree {
         let mut changed = false;
         self.children.retain(|_, node| match node {
             KeyNode::Leaf(v) => {
-                if v.file == target {
+                if paths_equal(&v.file, target) {
                     changed = true;
                     false
                 } else {
@@ -208,7 +209,12 @@ impl LocaleIndex {
     ) -> Result<bool, ParseError> {
         // Find the matching LocaleFile so we know which locale tree to
         // touch and how to prefix the parsed key paths.
-        let Some(locale_file) = self.files.iter().find(|f| f.path == path).cloned() else {
+        let Some(locale_file) = self
+            .files
+            .iter()
+            .find(|f| paths_equal(&f.path, path))
+            .cloned()
+        else {
             return Ok(false);
         };
 
@@ -218,7 +224,7 @@ impl LocaleIndex {
         let entries = parse_with_extension(content, path)?;
 
         let tree = self.trees.entry(locale_file.locale.clone()).or_default();
-        let had_leaves = tree.prune_leaves_from_file(path);
+        let had_leaves = tree.prune_leaves_from_file(&locale_file.path);
 
         let layout = self.layout.unwrap_or(LocaleLayout::Nested);
         let mut inline = locale_file.inline_namespace_root;
@@ -227,7 +233,7 @@ impl LocaleIndex {
         }
         let mut file_for_keys = locale_file.clone();
         file_for_keys.inline_namespace_root = inline;
-        if let Some(idx_file) = self.files.iter_mut().find(|f| f.path == path) {
+        if let Some(idx_file) = self.files.iter_mut().find(|f| paths_equal(&f.path, path)) {
             idx_file.inline_namespace_root = inline;
         }
 
@@ -239,7 +245,7 @@ impl LocaleIndex {
                 &full_path,
                 LocalizedValue {
                     value: entry.value,
-                    file: path.to_path_buf(),
+                    file: locale_file.path.clone(),
                     range: entry.range,
                     key_range: entry.key_range,
                 },
@@ -517,7 +523,7 @@ fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexErr
         out.push(LocaleFile {
             locale,
             namespace,
-            path: path.to_path_buf(),
+            path: normalize_path(path),
             inline_namespace_root: false,
         });
     }

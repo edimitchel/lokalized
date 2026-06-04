@@ -12,9 +12,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use i18n_core::{
-    build_document_symbol_tree, escape_md, find_usages, insert_key_json, remove_key_json,
-    truncate_chars, DocumentSymbolNode, IndexBuilder, KeyUsage, LineIndex, LocaleFile, LocaleIndex,
-    LocaleLayout, LocalizedValue, ParsedValue, ProjectConfig, UsageIndex,
+    build_document_symbol_tree, escape_md, find_usages, insert_key_json, normalize_path,
+    parse_linked_message, paths_equal, remove_key_json, resolve_value, truncate_chars,
+    DocumentSymbolNode, IndexBuilder, KeyUsage, LineIndex, Locale, LocaleEntry, LocaleFile,
+    LocaleIndex, LocaleLayout, LocalizedValue, ParsedValue, ProjectConfig, ResolvedValue,
+    UsageIndex,
 };
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, RwLock};
@@ -27,7 +29,7 @@ use tower_lsp::lsp_types::{
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
     MessageType, OneOf, Position as LspPosition, Range as LspRange, ReferenceParams,
     ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
@@ -158,6 +160,9 @@ impl LanguageServer for Backend {
             // `missing-key`/`missing-source` warnings; refresh them all.
             self.republish_source_diagnostics().await;
         }
+        if locale_changed || usages_changed || self.index.read().await.is_some() {
+            refresh_inlay_hints(&self.client).await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -188,6 +193,9 @@ impl LanguageServer for Backend {
         if locale_changed {
             self.republish_source_diagnostics().await;
         }
+        if locale_changed || usages_changed {
+            refresh_inlay_hints(&self.client).await;
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -202,6 +210,36 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
+        let index_guard = self.index.read().await;
+        let Some(idx) = &*index_guard else {
+            return Ok(None);
+        };
+
+        let Ok(path) = uri.to_file_path() else {
+            return Ok(None);
+        };
+        if is_indexed_locale_path(idx, &path) {
+            let Some((key, entry, _locale_file)) =
+                locale_entry_at_position(&self.documents, idx, &uri, pos).await
+            else {
+                return Ok(None);
+            };
+            let values = idx.lookup(&key);
+            let md = format_hover_markdown(&key, &values, &idx.source_locale, idx);
+            let range = if parse_linked_message(&entry.value).is_some() {
+                to_lsp_range(&entry.range)
+            } else {
+                to_lsp_range(&entry.key_range)
+            };
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: md,
+                }),
+                range: Some(range),
+            }));
+        }
+
         let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
         };
@@ -209,16 +247,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let index_guard = self.index.read().await;
-        let Some(idx) = &*index_guard else {
-            return Ok(None);
-        };
         let values = idx.lookup(&usage.key);
         if values.is_empty() {
             return Ok(None);
         }
 
-        let md = format_hover_markdown(&usage.key, &values, &idx.source_locale);
+        let md = format_hover_markdown(&usage.key, &values, &idx.source_locale, idx);
 
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -232,8 +266,8 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
 
-        // Locale JSON files get a `· N usages` hint after each key, fed by
-        // the project-wide UsageIndex.
+        // Locale JSON: resolved preview for `@:` links, plus `· N usages` when
+        // the source scan is ready.
         if is_indexed_locale_uri(&self.index, &uri).await {
             let hints =
                 compute_locale_inlay_hints(&self.documents, &self.index, &self.usages, &uri).await;
@@ -244,11 +278,13 @@ impl LanguageServer for Backend {
         let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
         };
+
         let usages = find_usages(&doc.text, &doc.language_id);
 
         let index_guard = self.index.read().await;
         let Some(idx) = &*index_guard else {
-            return Ok(None);
+            info!(uri = %uri, "inlay_hint: index not ready");
+            return Ok(Some(Vec::new()));
         };
         let source = &idx.source_locale;
 
@@ -257,7 +293,7 @@ impl LanguageServer for Backend {
             .filter_map(|u| {
                 let values = idx.lookup(&u.key);
                 let value = values.get(source).copied()?;
-                Some(build_inlay_hint(u, value))
+                Some(build_inlay_hint(u, value, source, idx))
             })
             .collect();
 
@@ -279,15 +315,47 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
+        let index_guard = self.index.read().await;
+        let Some(idx) = &*index_guard else {
+            return Ok(None);
+        };
+
+        if is_indexed_locale_uri(&self.index, &uri).await {
+            if let Some(link_key) =
+                linked_target_at_locale_position(&self.documents, idx, &uri, pos).await
+            {
+                let locations: Vec<Location> = idx
+                    .lookup(&link_key)
+                    .values()
+                    .filter_map(|v| localized_value_to_location(v))
+                    .collect();
+                if !locations.is_empty() {
+                    return Ok(Some(GotoDefinitionResponse::Array(locations)));
+                }
+            }
+            if let Some(key) = key_under_cursor(&self.documents, &self.index, &uri, pos).await {
+                let usages_guard = self.usages.read().await;
+                let locations: Vec<Location> = usages_guard
+                    .locations_for_key(&key)
+                    .into_iter()
+                    .filter_map(|(path, range)| {
+                        Url::from_file_path(path).ok().map(|file_uri| Location {
+                            uri: file_uri,
+                            range: to_lsp_range(range),
+                        })
+                    })
+                    .collect();
+                if !locations.is_empty() {
+                    return Ok(Some(GotoDefinitionResponse::Array(locations)));
+                }
+            }
+            return Ok(None);
+        }
+
         let Some(doc) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
         };
         let Some(usage) = usage_at_position(&doc, pos) else {
-            return Ok(None);
-        };
-
-        let index_guard = self.index.read().await;
-        let Some(idx) = &*index_guard else {
             return Ok(None);
         };
 
@@ -323,6 +391,8 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        let index_guard = self.index.read().await;
+
         // Source-side usages first; this is the data the user usually wants.
         let usages_guard = self.usages.read().await;
         let mut locations: Vec<Location> = usages_guard
@@ -335,13 +405,24 @@ impl LanguageServer for Backend {
                 })
             })
             .collect();
+        if let Some(idx) = index_guard.as_ref() {
+            for alias_key in idx.keys_linking_to(&key) {
+                for value in idx.lookup(&alias_key).values() {
+                    if let Ok(file_uri) = Url::from_file_path(&value.file) {
+                        locations.push(Location {
+                            uri: file_uri,
+                            range: to_lsp_range(&value.key_range),
+                        });
+                    }
+                }
+            }
+        }
         drop(usages_guard);
 
         // Append locale-side declarations as a courtesy when asked. Zed's
         // default "Find All References" sets include_declaration=true.
         if params.context.include_declaration {
-            let index_guard = self.index.read().await;
-            if let Some(idx) = &*index_guard {
+            if let Some(idx) = index_guard.as_ref() {
                 for value in idx.lookup(&key).values() {
                     if let Ok(file_uri) = Url::from_file_path(&value.file) {
                         locations.push(Location {
@@ -785,13 +866,38 @@ async fn compute_locale_diagnostics(
     let Some(idx) = index_guard.as_ref() else {
         return Vec::new();
     };
-    let Some(locale_file) = idx.files.iter().find(|f| f.path == path) else {
+    let Some(locale_file) = find_locale_file(idx, &path) else {
         return Vec::new();
     };
 
     let mut out = Vec::new();
     for entry in entries {
         let key = idx.compose_full_key(locale_file, &entry.key_path);
+
+        if parse_linked_message(&entry.value).is_some() {
+            match resolve_value(idx, &locale_file.locale, &entry.value) {
+                ResolvedValue::Broken { target_key, reason } => {
+                    out.push(Diagnostic {
+                        range: to_lsp_range(&entry.range),
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                            "broken-link".into(),
+                        )),
+                        source: Some("lokalized".into()),
+                        message: format!(
+                            "Linked message `{}` is invalid ({reason}): `{target_key}`",
+                            entry.value
+                        ),
+                        ..Default::default()
+                    });
+                }
+                ResolvedValue::Linked { .. } => {}
+                ResolvedValue::Literal { .. } => {}
+            }
+            // Linked keys are aliases — skip unused-key noise on the alias name.
+            continue;
+        }
+
         if usages_guard.is_key_used(&key) {
             continue;
         }
@@ -812,8 +918,19 @@ async fn compute_locale_diagnostics(
     out
 }
 
+fn find_locale_file<'a>(idx: &'a LocaleIndex, path: &Path) -> Option<&'a LocaleFile> {
+    let path = normalize_path(path);
+    idx.files.iter().find(|f| paths_equal(&f.path, &path))
+}
+
 fn is_indexed_locale_path(idx: &LocaleIndex, path: &Path) -> bool {
-    idx.files.iter().any(|f| f.path == path)
+    find_locale_file(idx, path).is_some()
+}
+
+async fn refresh_inlay_hints(client: &Client) {
+    if let Err(e) = client.inlay_hint_refresh().await {
+        warn!("inlay_hint_refresh failed: {e}");
+    }
 }
 
 async fn is_indexed_locale_uri(index: &IndexSlot, uri: &Url) -> bool {
@@ -916,6 +1033,42 @@ fn localized_value_to_location(v: &LocalizedValue) -> Option<Location> {
     })
 }
 
+/// Locale JSON entry under the cursor (key name or string value).
+async fn locale_entry_at_position(
+    documents: &DocumentStore,
+    idx: &LocaleIndex,
+    uri: &Url,
+    pos: LspPosition,
+) -> Option<(String, LocaleEntry, LocaleFile)> {
+    let path = uri.to_file_path().ok()?;
+    let buffer = documents.read().await.get(uri).map(|d| d.text.clone())?;
+    let entries = i18n_core::parser::parse_with_extension(&buffer, &path).ok()?;
+    let entry = entries.into_iter().find(|e| {
+        range_contains_position(&e.key_range, pos) || range_contains_position(&e.range, pos)
+    })?;
+    let locale_file = find_locale_file(idx, &path)?.clone();
+    let key = idx.compose_full_key(&locale_file, &entry.key_path);
+    Some((key, entry, locale_file))
+}
+
+/// If the cursor sits on a linked message value (`@:other.key`), return that target key.
+async fn linked_target_at_locale_position(
+    documents: &DocumentStore,
+    idx: &LocaleIndex,
+    uri: &Url,
+    pos: LspPosition,
+) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    let buffer = documents.read().await.get(uri).map(|d| d.text.clone())?;
+    let entries = i18n_core::parser::parse_with_extension(&buffer, &path).ok()?;
+    let entry = entries
+        .into_iter()
+        .find(|e| range_contains_position(&e.range, pos))?;
+    let link = parse_linked_message(&entry.value)?;
+    let _locale_file = find_locale_file(idx, &path)?;
+    Some(link.target_key.to_string())
+}
+
 /// Resolve the translation key the user's cursor is currently on.
 ///
 /// Two modes:
@@ -938,7 +1091,7 @@ async fn key_under_cursor(
             .find(|e| range_contains_position(&e.key_range, pos))?;
         let guard = index.read().await;
         let idx = guard.as_ref()?;
-        let file = idx.files.iter().find(|f| f.path == path)?;
+        let file = find_locale_file(idx, &path)?;
         Some(idx.compose_full_key(file, &entry.key_path))
     } else {
         let doc = documents.read().await.get(uri).cloned()?;
@@ -948,9 +1101,12 @@ async fn key_under_cursor(
 
 /// Build the per-key occurrence-count inlay hints for a locale file.
 ///
-/// Re-parses the live buffer so ranges follow the user's edits. Skips keys
-/// with zero references — those are already flagged by the
-/// `unused-key` HINT diagnostic, no need to duplicate the signal.
+/// Re-parses the live buffer so ranges follow the user's edits.
+///
+/// - Linked values (`@:other.key`) always get a resolved-text inlay after the
+///   value (does not wait for the source scan).
+/// - Keys with usages get `· N usages` after the key name once the scan has
+///   finished; zero-reference keys are skipped (see `unused-key` diagnostic).
 async fn compute_locale_inlay_hints(
     documents: &DocumentStore,
     index: &IndexSlot,
@@ -972,40 +1128,90 @@ async fn compute_locale_inlay_hints(
     let Some(idx) = index_guard.as_ref() else {
         return Vec::new();
     };
-    let Some(locale_file) = idx.files.iter().find(|f| f.path == path) else {
+    let Some(locale_file) = find_locale_file(idx, &path) else {
         return Vec::new();
     };
 
+    let locale = &locale_file.locale;
     let usages_guard = usages.read().await;
-    // Pre-scan complete: until then, every count would be 0 and we'd emit
-    // nothing useful anyway.
-    if usages_guard.file_count() == 0 {
-        return Vec::new();
-    }
-    let counts = usages_guard.counts_by_key();
+    let scan_ready = usages_guard.file_count() > 0;
+    let counts = if scan_ready {
+        Some(usages_guard.counts_by_key())
+    } else {
+        None
+    };
 
-    let mut hints = Vec::with_capacity(entries.len());
+    let mut hints = Vec::with_capacity(entries.len() * 2);
     for entry in entries {
         let key = idx.compose_full_key(locale_file, &entry.key_path);
-        let count = counts.get(key.as_str()).copied().unwrap_or(0);
-        if count == 0 {
-            // Already surfaced by the unused-key diagnostic; avoid noise.
-            continue;
+
+        if let Some(link) = parse_linked_message(&entry.value) {
+            hints.push(build_locale_linked_inlay_hint(
+                &key,
+                &entry,
+                locale,
+                idx,
+                link.target_key,
+            ));
         }
-        hints.push(InlayHint {
-            position: to_lsp_position(&entry.key_range.end),
-            label: InlayHintLabel::String(format_count_label(count)),
-            kind: Some(InlayHintKind::PARAMETER),
-            text_edits: None,
-            tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(format!(
-                "`{key}` is referenced {count} time(s) in scanned source files",
-            ))),
-            padding_left: Some(true),
-            padding_right: Some(false),
-            data: None,
-        });
+
+        if let Some(counts) = &counts {
+            let count = counts.get(key.as_str()).copied().unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            hints.push(InlayHint {
+                position: to_lsp_position(&entry.key_range.end),
+                label: InlayHintLabel::String(format_count_label(count)),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(format!(
+                    "`{key}` is referenced {count} time(s) in scanned source files",
+                ))),
+                padding_left: Some(true),
+                padding_right: Some(false),
+                data: None,
+            });
+        }
     }
     hints
+}
+
+/// Inlay after a linked locale value showing the resolved translation.
+fn build_locale_linked_inlay_hint(
+    key: &str,
+    entry: &LocaleEntry,
+    locale: &Locale,
+    idx: &LocaleIndex,
+    target_key: &str,
+) -> InlayHint {
+    let display = idx.display_for_locale(locale, &entry.value);
+    let broken = display.starts_with('⛔');
+    let preview = if broken {
+        display.clone()
+    } else {
+        truncate_chars(
+            &ParsedValue::parse(&display).primary_form(),
+            60,
+        )
+    };
+    let label = if broken {
+        format!(" {preview}")
+    } else {
+        format!(" → {preview}")
+    };
+    InlayHint {
+        position: to_lsp_position(&entry.range.end),
+        label: InlayHintLabel::String(label),
+        kind: None,
+        text_edits: None,
+        tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(format!(
+            "`{key}` links to `{target_key}`\n\n{display}",
+        ))),
+        padding_left: Some(true),
+        padding_right: Some(false),
+        data: None,
+    }
 }
 
 /// Compact label for the per-key occurrence inlay hint. Singular vs plural
@@ -1018,23 +1224,29 @@ fn format_count_label(count: usize) -> String {
     }
 }
 
-fn build_inlay_hint(usage: &KeyUsage, value: &LocalizedValue) -> InlayHint {
-    let parsed = ParsedValue::parse(&value.value);
+fn build_inlay_hint(
+    usage: &KeyUsage,
+    value: &LocalizedValue,
+    locale: &Locale,
+    idx: &LocaleIndex,
+) -> InlayHint {
+    let display = idx.display_for_locale(locale, &value.value);
+    let parsed = ParsedValue::parse(&display);
     let preview = truncate_chars(parsed.primary_form(), 60);
-    // Surface plurality with a `…` hint so users know multiple forms exist.
+    let link_note = parse_linked_message(&value.value)
+        .map(|l| format!(" → `{}`", l.target_key))
+        .unwrap_or_default();
     let label = if parsed.is_plural() {
-        format!(" = {preview} …")
+        format!(" = {preview}{link_note} …")
     } else {
-        format!(" = {preview}")
+        format!(" = {preview}{link_note}")
     };
     InlayHint {
         position: to_lsp_position(&usage.range.end),
         label: InlayHintLabel::String(label),
-        kind: Some(InlayHintKind::PARAMETER),
+        kind: None,
         text_edits: None,
-        tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(
-            value.value.clone(),
-        )),
+        tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(display)),
         padding_left: Some(true),
         padding_right: Some(false),
         data: None,
@@ -1050,10 +1262,39 @@ fn build_inlay_hint(usage: &KeyUsage, value: &LocalizedValue) -> InlayHint {
 /// 4. Footer with *clickable* links to every defining file + line (Zed supports
 ///    `file://…` URIs in markdown links natively — they act as navigation
 ///    buttons since LSP hover does not permit real interactive controls).
+fn format_locale_value_markdown(locale: &Locale, raw: &str, idx: &LocaleIndex) -> String {
+    match resolve_value(idx, locale, raw) {
+        ResolvedValue::Literal { text } => escape_md(text),
+        ResolvedValue::Linked {
+            display,
+            target_key,
+            chain,
+            ..
+        } => {
+            let hops = if chain.len() > 1 {
+                format!(" ({})", chain.join(" → "))
+            } else {
+                String::new()
+            };
+            format!(
+                "{} _(linked via `{}`{})_",
+                escape_md(&display),
+                escape_md(&target_key),
+                hops
+            )
+        }
+        ResolvedValue::Broken {
+            target_key,
+            reason,
+        } => format!("⛔ {reason}: `{target_key}` (raw: `{}`)", escape_md(raw)),
+    }
+}
+
 fn format_hover_markdown(
     key: &str,
-    values: &std::collections::BTreeMap<&i18n_core::Locale, &LocalizedValue>,
-    source_locale: &i18n_core::Locale,
+    values: &std::collections::BTreeMap<&Locale, &LocalizedValue>,
+    source_locale: &Locale,
+    idx: &LocaleIndex,
 ) -> String {
     let mut md = String::with_capacity(384);
 
@@ -1062,8 +1303,10 @@ fn format_hover_markdown(
 
     // Prominent source-locale value, rendered as a blockquote.
     if let Some(src) = values.get(source_locale) {
-        let parsed = ParsedValue::parse(&src.value);
-        if parsed.is_plural() {
+        let display = format_locale_value_markdown(source_locale, &src.value, idx);
+        let resolved_display = idx.display_for_locale(source_locale, &src.value);
+        let parsed = ParsedValue::parse(&resolved_display);
+        if parsed.is_plural() && parse_linked_message(&src.value).is_none() {
             md.push_str(&format!("> **{source_locale}** (pluralised)\n>\n"));
             for (i, form) in parsed.forms.iter().enumerate() {
                 md.push_str(&format!(
@@ -1073,16 +1316,13 @@ fn format_hover_markdown(
                 ));
             }
         } else {
-            md.push_str(&format!(
-                "> **{source_locale}** — {}\n",
-                escape_md(&src.value),
-            ));
+            md.push_str(&format!("> **{source_locale}** — {display}\n"));
         }
         md.push('\n');
     }
 
     // Other locales (sorted alphabetically for stable output).
-    let mut others: Vec<(&i18n_core::Locale, &LocalizedValue)> = values
+    let mut others: Vec<(&Locale, &LocalizedValue)> = values
         .iter()
         .filter(|(locale, _)| locale != &&source_locale)
         .map(|(l, v)| (*l, *v))
@@ -1092,15 +1332,14 @@ fn format_hover_markdown(
     if !others.is_empty() {
         md.push_str("**Other locales**\n\n");
         for (locale, val) in others {
-            let parsed = ParsedValue::parse(&val.value);
-            let preview = truncate_chars(parsed.primary_form(), 80);
-            md.push_str(&format!("- **{locale}** — {}\n", escape_md(&preview)));
+            let line = format_locale_value_markdown(locale, &val.value, idx);
+            md.push_str(&format!("- **{locale}** — {line}\n"));
         }
         md.push('\n');
     }
 
     // Footer: clickable links to every locale file. Sorted by locale.
-    let mut files: Vec<(&i18n_core::Locale, &LocalizedValue)> =
+    let mut files: Vec<(&Locale, &LocalizedValue)> =
         values.iter().map(|(l, v)| (*l, *v)).collect();
     files.sort_by_key(|(l, _)| l.to_string());
 
@@ -1150,7 +1389,7 @@ async fn build_fill_missing_actions(idx: &LocaleIndex, key: &str) -> Vec<CodeAct
         .copied()
         .or_else(|| find_reference_value(idx, key));
     let source_file: Option<&LocaleFile> =
-        source_value.and_then(|v| idx.files.iter().find(|f| f.path == v.file));
+        source_value.and_then(|v| idx.files.iter().find(|f| paths_equal(&f.path, &v.file)));
 
     // Every locale present in the project.
     let all_locales: Vec<&i18n_core::Locale> = idx.trees.keys().collect();
@@ -1252,7 +1491,7 @@ async fn build_locale_code_actions(
     let full_key = {
         let guard = index.read().await;
         let idx = guard.as_ref()?;
-        let locale_file = idx.files.iter().find(|f| f.path == path)?;
+        let locale_file = find_locale_file(idx, &path)?;
         idx.compose_full_key(locale_file, &entry.key_path)
     };
 
@@ -1447,6 +1686,7 @@ async fn build_indexes_for_roots(
                     .log_message(MessageType::INFO, format!("Lokalized: {summary}"))
                     .await;
                 *index_slot.write().await = Some(index);
+                refresh_inlay_hints(&client).await;
 
                 // Walk the project for source-code translation usages. Done
                 // after the locale index is in place so the first published
@@ -1482,6 +1722,7 @@ async fn build_indexes_for_roots(
                         &scan_client,
                     )
                     .await;
+                    refresh_inlay_hints(&scan_client).await;
                 });
 
                 // Phase 1: stop at the first workspace root that yields an index,
@@ -1611,9 +1852,7 @@ async fn start_watcher(
                 // Inlay hints follow a pull model: the editor only re-fetches
                 // them when we ask it to. Without this, inlay hints keep
                 // showing stale translations until the user edits the buffer.
-                if let Err(e) = client.inlay_hint_refresh().await {
-                    warn!("inlay_hint_refresh failed: {e}");
-                }
+                refresh_inlay_hints(&client).await;
             }
             Err(e) => warn!("index rebuild failed: {e}"),
         }

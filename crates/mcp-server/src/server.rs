@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use i18n_core::{set_key_json, IndexBuilder, Locale, LocaleIndex, ProjectConfig};
+use i18n_core::{
+    parse_linked_message, resolve_value, set_key_json, IndexBuilder, Locale, LocaleIndex,
+    ProjectConfig, ResolvedValue,
+};
 use rmcp::{
     handler::server::wrapper::Parameters, schemars::JsonSchema, tool, tool_handler, tool_router,
     ServerHandler,
@@ -168,13 +171,46 @@ impl LokalizedMcp {
                     params.key, params.locale
                 ));
             };
-            Ok(serde_json::json!({
+            let mut out = serde_json::json!({
                 "key": params.key,
                 "locale": params.locale,
                 "value": value.value,
                 "file": value.file.display().to_string(),
-            })
-            .to_string())
+            });
+            match resolve_value(idx, &locale, &value.value) {
+                ResolvedValue::Literal { text } => {
+                    out["resolved"] = serde_json::Value::String(text.to_string());
+                }
+                ResolvedValue::Linked {
+                    display,
+                    target_key,
+                    chain,
+                    ..
+                } => {
+                    out["resolved"] = serde_json::Value::String(display);
+                    out["link"] = serde_json::json!({
+                        "target": target_key,
+                        "chain": chain,
+                    });
+                }
+                ResolvedValue::Broken {
+                    target_key,
+                    reason,
+                } => {
+                    out["resolved"] = serde_json::Value::Null;
+                    out["linkError"] = serde_json::json!({
+                        "target": target_key,
+                        "reason": reason,
+                    });
+                }
+            }
+            if let Some(link) = parse_linked_message(&value.value) {
+                out["isLinked"] = serde_json::Value::Bool(true);
+                if let Some(m) = link.modifier {
+                    out["modifier"] = serde_json::Value::String(m.to_string());
+                }
+            }
+            Ok(out.to_string())
         })
         .await
     }

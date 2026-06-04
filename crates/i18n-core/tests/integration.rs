@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use i18n_core::{IndexBuilder, Locale, LocaleLayout, ProjectConfig};
+use i18n_core::{
+    resolve_value, IndexBuilder, Locale, LocaleLayout, ProjectConfig, ResolvedValue,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -237,6 +239,33 @@ fn nuxt_per_locale_folder_indexes_global_cant_select() {
         "trees={:?}",
         index.trees.keys().collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn linked_messages_resolve_through_index() {
+    let root = fixture("linked_messages");
+    let config = ProjectConfig {
+        locale_paths: vec!["locales".into()],
+        namespace: Some(false),
+        source_locale: Some("en".into()),
+        ..Default::default()
+    };
+    let index = IndexBuilder::new(&root, &config).build().expect("build");
+
+    let values = index.lookup("common.payfip");
+    let alias = values.get(&Locale::new("en")).expect("alias");
+    assert_eq!(alias.value, "@:common.providers.payfip");
+
+    match resolve_value(&index, &Locale::new("en"), &alias.value) {
+        ResolvedValue::Linked { display, target_key, .. } => {
+            assert_eq!(target_key, "common.providers.payfip");
+            assert_eq!(display, "PayFiP");
+        }
+        other => panic!("expected Linked, got {other:?}"),
+    }
+
+    let backlinks = index.keys_linking_to("common.providers.payfip");
+    assert!(backlinks.iter().any(|k| k == "common.payfip"));
 }
 
 #[test]

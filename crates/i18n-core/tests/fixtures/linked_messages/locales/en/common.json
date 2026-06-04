@@ -1,0 +1,8 @@
+{
+  "common": {
+    "providers": {
+      "payfip": "PayFiP"
+    },
+    "payfip": "@:common.providers.payfip"
+  }
+}
