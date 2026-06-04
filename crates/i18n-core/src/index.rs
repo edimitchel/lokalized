@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectConfig;
 use crate::locale::{Locale, LocaleFile, LocaleLayout};
-use crate::parser::{parse_file, parse_with_extension, ParseError};
+use crate::parser::{parse_file, parse_with_extension, LocaleEntry, ParseError};
 use crate::position::Range;
 use crate::scan::UsageIndex;
 
@@ -185,15 +185,8 @@ impl LocaleIndex {
     /// the on-disk index) reconstruct the same dotted keys the source-side
     /// scanner sees, so usage lookups stay consistent.
     pub fn compose_full_key(&self, file: &LocaleFile, key_path: &[String]) -> String {
-        let mut full: Vec<String> = Vec::with_capacity(key_path.len() + 1);
-        let nested = matches!(self.layout, Some(LocaleLayout::Nested));
-        if nested && self.config.use_file_namespace() {
-            if let Some(ns) = &file.namespace {
-                full.push(ns.clone());
-            }
-        }
-        full.extend(key_path.iter().cloned());
-        full.join(".")
+        let layout = self.layout.unwrap_or(LocaleLayout::Nested);
+        push_namespaced_key_path(file, key_path, layout, &self.config).join(".")
     }
 
     /// Replace every leaf previously sourced from `path` with whatever
@@ -227,17 +220,21 @@ impl LocaleIndex {
         let tree = self.trees.entry(locale_file.locale.clone()).or_default();
         let had_leaves = tree.prune_leaves_from_file(path);
 
-        let nested = matches!(self.layout, Some(LocaleLayout::Nested));
-        let prepend_ns = nested && self.config.use_file_namespace();
+        let layout = self.layout.unwrap_or(LocaleLayout::Nested);
+        let mut inline = locale_file.inline_namespace_root;
+        if let Some(ns) = &locale_file.namespace {
+            inline = entries_use_inline_namespace_root(&entries, ns);
+        }
+        let mut file_for_keys = locale_file.clone();
+        file_for_keys.inline_namespace_root = inline;
+        if let Some(idx_file) = self.files.iter_mut().find(|f| f.path == path) {
+            idx_file.inline_namespace_root = inline;
+        }
+
         let mut inserted = 0usize;
         for entry in entries {
-            let mut full_path: Vec<String> = Vec::with_capacity(entry.key_path.len() + 1);
-            if prepend_ns {
-                if let Some(ns) = &locale_file.namespace {
-                    full_path.push(ns.clone());
-                }
-            }
-            full_path.extend(entry.key_path);
+            let full_path =
+                push_namespaced_key_path(&file_for_keys, &entry.key_path, layout, &self.config);
             tree.insert(
                 &full_path,
                 LocalizedValue {
@@ -344,24 +341,18 @@ impl<'a> IndexBuilder<'a> {
         }
 
         let layout = Self::detect_layout(&files);
-        let use_file_namespace = self.config.use_file_namespace();
+        let mut files = files;
 
         let mut trees: BTreeMap<Locale, KeyTree> = BTreeMap::new();
-        for file in &files {
+        for file in &mut files {
             let entries = parse_file(&file.path)?;
+            if let Some(ns) = &file.namespace {
+                file.inline_namespace_root = entries_use_inline_namespace_root(&entries, ns);
+            }
             let tree = trees.entry(file.locale.clone()).or_default();
             for entry in entries {
-                let mut full_path = Vec::new();
-                // Only prepend the filename stem when the user opts into the
-                // `namespace = true` i18n-ally semantics. Projects where each
-                // JSON already wraps its content (`{ "slots": {...} }`) should
-                // set `namespace: false` to avoid double-prefixing.
-                if layout == LocaleLayout::Nested && use_file_namespace {
-                    if let Some(ns) = &file.namespace {
-                        full_path.push(ns.clone());
-                    }
-                }
-                full_path.extend(entry.key_path);
+                let full_path =
+                    push_namespaced_key_path(file, &entry.key_path, layout, self.config);
 
                 tree.insert(
                     &full_path,
@@ -407,6 +398,53 @@ impl<'a> IndexBuilder<'a> {
     }
 }
 
+/// True when every parsed key is under a top-level JSON property matching the
+/// filename stem (`slots.json` + `{ "slots": { ... } }`).
+fn entries_use_inline_namespace_root(entries: &[LocaleEntry], stem: &str) -> bool {
+    !entries.is_empty()
+        && entries
+            .iter()
+            .all(|e| e.key_path.first().map(|s| s.as_str()) == Some(stem))
+}
+
+fn push_namespaced_key_path(
+    file: &LocaleFile,
+    key_path: &[String],
+    layout: LocaleLayout,
+    config: &ProjectConfig,
+) -> Vec<String> {
+    let mut full_path = Vec::with_capacity(key_path.len() + 1);
+    if file.should_prepend_filename_namespace(config, layout) {
+        if let Some(ns) = &file.namespace {
+            full_path.push(ns.clone());
+        }
+    }
+    full_path.extend(key_path.iter().cloned());
+    full_path
+}
+
+/// Map a dotted index key to the path segments used inside a locale file.
+pub fn key_path_in_file(
+    key: &str,
+    file: &LocaleFile,
+    layout: LocaleLayout,
+    config: &ProjectConfig,
+) -> Vec<String> {
+    let segments: Vec<String> = key.split('.').map(str::to_string).collect();
+    if layout != LocaleLayout::Nested {
+        return segments;
+    }
+    let Some(ns) = file.namespace.as_deref() else {
+        return segments;
+    };
+    if file.should_prepend_filename_namespace(config, layout)
+        && segments.first().map(|s| s.as_str()) == Some(ns)
+    {
+        return segments.into_iter().skip(1).collect();
+    }
+    segments
+}
+
 /// Use configured source locale when present; otherwise the first locale found
 /// (covers fr-only projects where `en` is configured by default).
 fn resolve_source_locale(
@@ -448,10 +486,22 @@ fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexErr
         let parent = path.parent().unwrap_or(dir);
 
         let (locale, namespace) = if parent == dir {
-            // Flat: `en.json`, `fr.json`, or ARB `app_en.arb`
-            (extract_locale_from_stem(&stem), None)
+            // `locales/fr/global.json` with `localePaths` pointing at `locales/fr`
+            // (Nuxt / @nuxtjs/i18n: one folder per locale, one file per namespace).
+            if let (Some(_grandparent), Some(locale_segment)) =
+                (parent.parent(), parent.file_name().and_then(|s| s.to_str()))
+            {
+                if looks_like_locale_folder_name(locale_segment) {
+                    (Locale::new(locale_segment), Some(stem))
+                } else {
+                    (extract_locale_from_stem(&stem), None)
+                }
+            } else {
+                // Flat: `locales/en.json`, `en.json`, or ARB `app_en.arb`
+                (extract_locale_from_stem(&stem), None)
+            }
         } else {
-            // Nested: `<locale>/<namespace>.json`
+            // Nested: `<locale>/<namespace>.json` under a locales root
             let locale_name = parent
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -468,9 +518,19 @@ fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexErr
             locale,
             namespace,
             path: path.to_path_buf(),
+            inline_namespace_root: false,
         });
     }
     Ok(())
+}
+
+/// True when `name` is a BCP-47-ish locale folder (`fr`, `en-US`), not `locales` or `src`.
+fn looks_like_locale_folder_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "locales" | "l10n")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn extract_locale_from_stem(stem: &str) -> Locale {

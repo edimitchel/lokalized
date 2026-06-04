@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ProjectConfig;
+
 /// BCP-47 locale code (e.g. `"en"`, `"fr-FR"`).
 ///
 /// Normalised to lowercase with `-` as separator.
@@ -55,4 +57,22 @@ pub struct LocaleFile {
     /// Namespace derived from the filename stem (only for nested layouts).
     pub namespace: Option<String>,
     pub path: PathBuf,
+    /// `true` when every key in the file lives under a top-level JSON object whose
+    /// key equals the filename stem (e.g. `slots.json` → `{ "slots": { ... } }`).
+    /// In that case the stem must not be prepended again, even when `namespace: true`.
+    pub inline_namespace_root: bool,
+}
+
+impl LocaleFile {
+    /// Whether the indexer / LSP should prepend the filename stem to parsed key paths.
+    pub fn should_prepend_filename_namespace(
+        &self,
+        config: &ProjectConfig,
+        layout: LocaleLayout,
+    ) -> bool {
+        layout == LocaleLayout::Nested
+            && config.use_file_namespace()
+            && self.namespace.is_some()
+            && !self.inline_namespace_root
+    }
 }

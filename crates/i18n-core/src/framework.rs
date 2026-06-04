@@ -329,3 +329,21 @@ mod tests {
         assert_eq!(usages, vec![]);
     }
 }
+
+#[cfg(test)]
+mod mg_shop_usage_tests {
+    use super::find_usages;
+
+    #[test]
+    fn finds_global_cant_select_in_table_snippet() {
+        let src = r#"
+					title: $t("global.cantSelect"),
+"#;
+        let usages = find_usages(src, "Vue.js");
+        let keys: Vec<_> = usages.iter().map(|u| u.key.as_str()).collect();
+        assert!(
+            keys.contains(&"global.cantSelect"),
+            "keys found: {keys:?}"
+        );
+    }
+}

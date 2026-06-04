@@ -1178,7 +1178,7 @@ async fn build_fill_missing_actions(idx: &LocaleIndex, key: &str) -> Vec<CodeAct
         };
 
         // Key path relative to the JSON root of the target file.
-        let path_segments = key_path_in_file(key, target.namespace.as_deref(), layout, idx);
+        let path_segments = i18n_core::key_path_in_file(key, target, layout, &idx.config);
         if path_segments.is_empty() {
             continue;
         }
@@ -1372,42 +1372,6 @@ fn find_target_file<'a>(
         Some(_) => None, // ambiguous
         None => first,
     }
-}
-
-/// Compute the dot-path of `key` *relative to the JSON root of the target file*.
-///
-/// Two semantics, controlled by `config.namespace`:
-///
-/// - **Nested + `namespace: true`** (default, i18n-ally style) — the indexer
-///   prepended the filename stem to every key, so the stored path already
-///   includes the namespace. The JSON file itself, however, does *not* start
-///   with a `{ stem: {...} }` wrapper, so we must strip the first segment
-///   before writing.
-/// - **Nested + `namespace: false`** — the JSON is self-wrapped
-///   (`{"slots": {...}}`) and the indexer stored keys exactly as they appear.
-///   No stripping: the full key navigates into the JSON as-is.
-/// - **Flat layout** — the JSON holds every top-level key; no stripping.
-fn key_path_in_file(
-    key: &str,
-    file_namespace: Option<&str>,
-    layout: LocaleLayout,
-    idx: &LocaleIndex,
-) -> Vec<String> {
-    let segments: Vec<String> = key.split('.').map(str::to_string).collect();
-    if layout != LocaleLayout::Nested {
-        return segments;
-    }
-    let Some(ns) = file_namespace else {
-        return segments;
-    };
-    // Strip only when the indexer explicitly prepended the namespace.
-    // `config.namespace` is the source of truth here — the tree structure
-    // alone cannot distinguish `namespace: true` from `namespace: false`
-    // because both end up with `{ns: {...}}` at the top.
-    if idx.config.use_file_namespace() && segments.first().map(String::as_str) == Some(ns) {
-        return segments.into_iter().skip(1).collect();
-    }
-    segments
 }
 
 fn whole_file_range(content: &str) -> LspRange {

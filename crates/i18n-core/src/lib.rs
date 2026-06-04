@@ -17,7 +17,9 @@ pub mod symbols;
 pub use config::{KeyStyle, ProjectConfig};
 pub use display::{escape_md, truncate_chars, ParsedValue};
 pub use framework::{find_usages, Framework, KeyUsage, BUILTIN_FRAMEWORKS};
-pub use index::{IndexBuilder, IndexError, KeyNode, KeyTree, LocaleIndex, LocalizedValue};
+pub use index::{
+    key_path_in_file, IndexBuilder, IndexError, KeyNode, KeyTree, LocaleIndex, LocalizedValue,
+};
 pub use locale::{Locale, LocaleFile, LocaleLayout};
 pub use mutation::{detect_indent, insert_key_json, remove_key_json, set_key_json, MutationError};
 pub use parser::{parse_file, LocaleEntry, LocaleParser, ParseError};

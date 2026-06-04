@@ -130,6 +130,116 @@ fn monorepo_project_finds_front_locale_dir() {
 }
 
 #[test]
+fn namespace_false_keeps_json_root_keys_without_filename_prefix() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let locales = dir.path().join("locales");
+    fs::create_dir_all(locales.join("en")).unwrap();
+    fs::write(
+        locales.join("en/slots.json"),
+        r#"{"slots":{"title":"Title","save":"Save"}}"#,
+    )
+    .unwrap();
+
+    let config = ProjectConfig {
+        locale_paths: vec!["locales".into()],
+        namespace: Some(false),
+        ..ProjectConfig::default()
+    };
+    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+
+    assert!(
+        index.lookup("slots.title").contains_key(&Locale::new("en")),
+        "expected slots.title without double prefix"
+    );
+    assert!(index.lookup("slots.slots.title").is_empty());
+}
+
+#[test]
+fn namespace_true_avoids_double_prefix_when_json_is_self_wrapped() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let locales = dir.path().join("locales");
+    fs::create_dir_all(locales.join("en")).unwrap();
+    fs::write(
+        locales.join("en/slots.json"),
+        r#"{"slots":{"title":"Title"}}"#,
+    )
+    .unwrap();
+
+    let config = ProjectConfig {
+        locale_paths: vec!["locales".into()],
+        namespace: Some(true),
+        ..ProjectConfig::default()
+    };
+    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+
+    assert!(index.lookup("slots.title").contains_key(&Locale::new("en")));
+    assert!(index.lookup("slots.slots.title").is_empty());
+}
+
+#[test]
+fn namespace_true_prepends_stem_for_flat_json_content() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let locales = dir.path().join("locales");
+    fs::create_dir_all(locales.join("en")).unwrap();
+    fs::write(
+        locales.join("en/common.json"),
+        r#"{"actions":{"submit":"Submit"}}"#,
+    )
+    .unwrap();
+
+    let config = ProjectConfig {
+        locale_paths: vec!["locales".into()],
+        namespace: Some(true),
+        ..ProjectConfig::default()
+    };
+    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+
+    assert!(
+        index
+            .lookup("common.actions.submit")
+            .contains_key(&Locale::new("en"))
+    );
+}
+
+#[test]
+fn nuxt_per_locale_folder_indexes_global_cant_select() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let fr = dir.path().join("locales/fr");
+    fs::create_dir_all(&fr).unwrap();
+    fs::write(
+        fr.join("global.json"),
+        r#"{"global":{"cantSelect":"nope"}}"#,
+    )
+    .unwrap();
+
+    let config = ProjectConfig {
+        locale_paths: vec!["locales/fr".into()],
+        namespace: Some(true),
+        source_locale: Some("fr".into()),
+        ..ProjectConfig::default()
+    };
+    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+    assert_eq!(index.source_locale.as_str(), "fr");
+    assert!(
+        index.lookup("global.cantSelect").contains_key(&Locale::new("fr")),
+        "trees={:?}",
+        index.trees.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn missing_locale_dir_yields_no_locales_error() {
     let root = fixture("nonexistent");
     let config = ProjectConfig::auto_detect(&root);
@@ -137,5 +247,19 @@ fn missing_locale_dir_yields_no_locales_error() {
     match err {
         i18n_core::IndexError::NoLocalesFound => {}
         other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn wrong_locale_paths_from_front_subfolder_breaks_index() {
+    let root = PathBuf::from("/Users/medighoffer/DEV/MG_SHOP/front");
+    if !root.is_dir() {
+        return;
+    }
+    let config = ProjectConfig::load(&PathBuf::from("/Users/medighoffer/DEV/MG_SHOP"));
+    let err = IndexBuilder::new(&root, &config).build().unwrap_err();
+    match err {
+        i18n_core::IndexError::NoLocalesFound => {}
+        other => panic!("expected NoLocalesFound, got {other:?}"),
     }
 }
