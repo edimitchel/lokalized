@@ -1,15 +1,18 @@
-//! Project configuration loaded from `.zed/lokalize.json` (with sensible auto-detection).
+//! Project configuration loaded from `.zed/lokalized.json` (with sensible auto-detection).
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 use crate::locale::Locale;
 
-/// Directories commonly used to store locale files, checked in order during auto-detection.
+/// Directories commonly used to store locale files at the workspace root.
 const CANDIDATE_LOCALE_DIRS: &[&str] = &[
     "locales",
     "src/locales",
+    "i18n/locales",
     "i18n",
     "public/locales",
     "lib/l10n",
@@ -17,9 +20,51 @@ const CANDIDATE_LOCALE_DIRS: &[&str] = &[
     "assets/locales",
 ];
 
-/// Configuration for a Lokalize-enabled workspace.
+/// Common locale roots in monorepos (front/back, apps/packages, …).
+const MONOREPO_LOCALE_DIRS: &[&str] = &[
+    "front/i18n/locales",
+    "front/locales",
+    "frontend/i18n/locales",
+    "frontend/locales",
+    "client/i18n/locales",
+    "client/locales",
+    "web/i18n/locales",
+    "web/locales",
+    "apps/web/locales",
+    "apps/frontend/locales",
+    "packages/app/locales",
+];
+
+const LOCALE_DIR_NAMES: &[&str] = &["locales", "l10n"];
+
+/// Max depth when scanning a monorepo for nested locale directories.
+const DISCOVER_MAX_DEPTH: usize = 8;
+
+/// Directory names skipped while scanning for locale folders.
+const DISCOVER_EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "coverage",
+    ".git",
+    ".nuxt",
+    ".output",
+    ".next",
+    ".svelte-kit",
+    ".turbo",
+    ".vercel",
+    ".cache",
+    ".idea",
+    ".vscode",
+    ".pnpm-store",
+    "vendor",
+];
+
+/// Configuration for a Lokalized-enabled workspace.
 ///
-/// Loaded from `.zed/lokalize.json`. All fields are optional — missing values
+/// Loaded from `.zed/lokalized.json`. All fields are optional — missing values
 /// fall back to filesystem heuristics. Field names mirror the i18n-ally VSCode
 /// extension settings to simplify migration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -79,11 +124,13 @@ impl ProjectConfig {
     /// Load project config from the workspace root.
     ///
     /// Order of resolution:
-    /// 1. `.zed/lokalize.json`
+    /// 1. `.zed/lokalized.json` (legacy: `.zed/lokalize.json`)
     /// 2. Filesystem auto-detection (common locale directory names)
     pub fn load(workspace_root: &Path) -> Self {
-        if let Some(cfg) = Self::read_from_file(&workspace_root.join(".zed/lokalize.json")) {
-            return cfg.with_auto_detected_fallback(workspace_root);
+        for config_name in [".zed/lokalized.json", ".zed/lokalize.json"] {
+            if let Some(cfg) = Self::read_from_file(&workspace_root.join(config_name)) {
+                return cfg.with_auto_detected_fallback(workspace_root);
+            }
         }
         Self::auto_detect(workspace_root)
     }
@@ -119,11 +166,85 @@ impl ProjectConfig {
 }
 
 fn detect_locale_dirs(root: &Path) -> Vec<String> {
-    CANDIDATE_LOCALE_DIRS
+    let mut found = HashSet::new();
+
+    for candidate in CANDIDATE_LOCALE_DIRS
         .iter()
-        .filter(|c| root.join(c).is_dir())
-        .map(|c| (*c).to_string())
-        .collect()
+        .chain(MONOREPO_LOCALE_DIRS.iter())
+    {
+        let path = root.join(candidate);
+        if looks_like_locale_dir(&path) {
+            found.insert((*candidate).to_string());
+        }
+    }
+
+    for path in discover_locale_dirs_deep(root) {
+        found.insert(path);
+    }
+
+    let mut paths: Vec<_> = found.into_iter().collect();
+    paths.sort();
+    paths
+}
+
+/// Walk the workspace (e.g. monorepo root) and collect `**/locales` folders that
+/// actually contain translation files.
+fn discover_locale_dirs_deep(root: &Path) -> Vec<String> {
+    let mut found = HashSet::new();
+    let walker = WalkDir::new(root)
+        .max_depth(DISCOVER_MAX_DEPTH)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !is_excluded_discover_dir(e.path()));
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !LOCALE_DIR_NAMES.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if !looks_like_locale_dir(path) {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            found.insert(rel.display().to_string());
+        }
+    }
+
+    let mut paths: Vec<_> = found.into_iter().collect();
+    paths.sort();
+    paths
+}
+
+fn is_excluded_discover_dir(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| DISCOVER_EXCLUDED_DIRS.contains(&s))
+    })
+}
+
+fn looks_like_locale_dir(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    WalkDir::new(dir)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .any(|e| e.file_type().is_file() && is_locale_data_file(e.path()))
+}
+
+fn is_locale_data_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "json" | "jsonc" | "json5" | "arb" | "yml" | "yaml"))
 }
 
 #[cfg(test)]
@@ -134,6 +255,21 @@ mod tests {
     fn source_locale_defaults_to_en() {
         let cfg = ProjectConfig::default();
         assert_eq!(cfg.resolved_source_locale().as_str(), "en");
+    }
+
+    #[test]
+    fn detects_monorepo_front_locale_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let locale_file = tmp.path().join("front/i18n/locales/fr/app.json");
+        std::fs::create_dir_all(locale_file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&locale_file, r#"{"hello":"bonjour"}"#).expect("write");
+
+        let cfg = ProjectConfig::auto_detect(tmp.path());
+        assert!(
+            cfg.locale_paths.iter().any(|p| p == "front/i18n/locales"),
+            "expected front/i18n/locales, got {:?}",
+            cfg.locale_paths
+        );
     }
 
     #[test]

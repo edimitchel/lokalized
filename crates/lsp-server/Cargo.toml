@@ -1,14 +1,14 @@
 [package]
-name = "lokalize-lsp"
+name = "lokalized-lsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Language server for the Lokalize (i18n) Zed extension"
+description = "Language server for the Lokalized (i18n) Zed extension"
 
 [[bin]]
-name = "lokalize-lsp"
+name = "lokalized-lsp"
 path = "src/main.rs"
 
 [dependencies]

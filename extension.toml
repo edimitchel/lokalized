@@ -1,11 +1,14 @@
-id = "lokalize"
-name = "Lokalize"
+id = "lokalized"
+name = "Lokalized"
 description = "All-in-one i18n support for Zed: inline translations, hover previews, go-to-definition, diagnostics, and more. Inspired by i18n-ally."
 version = "0.0.1"
 schema_version = 1
-authors = ["medighoffer"]
-repository = "https://github.com/medighoffer/lokalize-vue"
+authors = ["edimitchel"]
+repository = "https://github.com/edimitchel/lokalized"
 
-[language_servers.lokalize]
-name = "Lokalize LSP"
-languages = ["Vue.js", "TypeScript", "TSX", "JavaScript", "JSX", "HTML", "JSON", "JSONC", "JSON5"]
+[language_servers.lokalized]
+name = "Lokalized LSP"
+languages = ["Vue.js", "TypeScript", "TSX", "JavaScript", "JSX", "HTML", "JSON", "JSONC", "JSON5", "YAML"]
+
+[context_servers.lokalized]
+name = "Lokalized"

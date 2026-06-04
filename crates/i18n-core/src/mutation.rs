@@ -107,6 +107,60 @@ fn insert_into_value(root: &mut Value, path: &[&str], value: &str) -> Result<(),
     Ok(())
 }
 
+/// Set (create or replace) the leaf key at `path` in a JSON document.
+///
+/// Same formatting rules as [`insert_key_json`], but overwrites an existing
+/// value when the key is already present.
+pub fn set_key_json(content: &str, path: &[&str], value: &str) -> Result<String, MutationError> {
+    if path.is_empty() {
+        return Err(MutationError::EmptyPath);
+    }
+
+    let mut root: Value = serde_json::from_str(content).map_err(MutationError::Parse)?;
+    let indent = detect_indent(content);
+    let trailing_newline = content.ends_with('\n');
+
+    set_into_value(&mut root, path, value)?;
+
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    root.serialize(&mut ser).map_err(MutationError::Serialize)?;
+
+    let mut out = String::from_utf8(buf).expect("serde_json emits UTF-8");
+    if trailing_newline && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn set_into_value(root: &mut Value, path: &[&str], value: &str) -> Result<(), MutationError> {
+    let mut current = root;
+    for (i, part) in path.iter().enumerate() {
+        let is_leaf = i == path.len() - 1;
+        let map = current
+            .as_object_mut()
+            .ok_or_else(|| MutationError::PathCollision(path[..=i].join(".")))?;
+
+        if is_leaf {
+            if map.contains_key(*part) {
+                map.insert(part.to_string(), Value::String(value.to_string()));
+            } else {
+                sorted_or_append_insert(map, part, Value::String(value.to_string()));
+            }
+            return Ok(());
+        }
+
+        if !map.contains_key(*part) {
+            sorted_or_append_insert(map, part, Value::Object(serde_json::Map::new()));
+        }
+        current = map
+            .get_mut(*part)
+            .expect("branch was just inserted or already present");
+    }
+    Ok(())
+}
+
 /// Remove the leaf key at `path` from a JSON document.
 ///
 /// - Empty intermediate objects left behind by the removal are pruned
@@ -339,6 +393,24 @@ mod tests {
         let input = "{\n  \"a\": \"1\"\n}";
         let out = insert_key_json(input, &["b"], "2").unwrap();
         assert_eq!(out, "{\n  \"a\": \"1\",\n  \"b\": \"2\"\n}");
+    }
+
+    #[test]
+    fn set_key_overwrites_existing_value() {
+        let input = r#"{
+  "a": "1"
+}
+"#;
+        let out = set_key_json(input, &["a"], "2").unwrap();
+        assert_eq!(out, "{\n  \"a\": \"2\"\n}\n");
+    }
+
+    #[test]
+    fn set_key_creates_missing_branch() {
+        let input = "{}\n";
+        let out = set_key_json(input, &["menu", "home"], "Home").unwrap();
+        assert!(out.contains("\"menu\""));
+        assert!(out.contains("\"home\": \"Home\""));
     }
 
     #[test]

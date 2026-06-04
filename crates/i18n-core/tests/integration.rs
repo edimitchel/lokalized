@@ -107,6 +107,29 @@ fn nested_yaml_project_builds_complete_index() {
 }
 
 #[test]
+fn monorepo_project_finds_front_locale_dir() {
+    let root = fixture("monorepo_project");
+    let config = ProjectConfig::auto_detect(&root);
+    assert!(
+        config
+            .locale_paths
+            .iter()
+            .any(|p| p == "front/i18n/locales"),
+        "locale_paths = {:?}",
+        config.locale_paths
+    );
+
+    let index = IndexBuilder::new(&root, &config).build().expect("build");
+    assert_eq!(index.source_locale.as_str(), "fr");
+    let hello = index
+        .lookup("app.hello")
+        .get(&Locale::new("fr"))
+        .copied()
+        .expect("fr hello");
+    assert_eq!(hello.value, "bonjour");
+}
+
+#[test]
 fn missing_locale_dir_yields_no_locales_error() {
     let root = fixture("nonexistent");
     let config = ProjectConfig::auto_detect(&root);

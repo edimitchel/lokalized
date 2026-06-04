@@ -1,11 +1,11 @@
 [package]
-name = "lokalize"
+name = "lokalized"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
 publish = false
 description = "i18n support for Zed: inline translations, hover, go-to-def, diagnostics, and more"
-repository = "https://github.com/medighoffer/lokalize-vue"
+repository = "https://github.com/edimitchel/lokalized"
 
 [lib]
 crate-type = ["cdylib"]
@@ -27,8 +27,8 @@ resolver = "2"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/medighoffer/lokalize-vue"
-authors = ["medighoffer"]
+repository = "https://github.com/edimitchel/lokalized"
+authors = ["edimitchel"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +45,8 @@ walkdir = "2"
 regex = "1"
 notify = "6"
 tempfile = "3"
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1"
 i18n-core = { path = "crates/i18n-core" }
 
 [profile.release]

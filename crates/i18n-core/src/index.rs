@@ -150,6 +150,23 @@ impl LocaleIndex {
         out
     }
 
+    /// All `(dotted_key, value)` pairs defined in `path`, across locales.
+    pub fn entries_for_file(&self, path: &Path) -> Vec<(String, &LocalizedValue)> {
+        self.entries_by_file()
+            .get(path)
+            .map(|entries| entries.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Path to the locale file for `locale` in a flat layout, or the first file
+    /// for that locale in nested layout.
+    pub fn locale_file_path(&self, locale: &Locale) -> Option<PathBuf> {
+        self.files
+            .iter()
+            .find(|f| &f.locale == locale)
+            .map(|f| f.path.clone())
+    }
+
     /// Subset of [`Self::all_keys`] that no source file in `usages`
     /// references. Best-effort: dynamic keys (`t(name)`, template literals)
     /// look unused to this scan and the LSP surfaces them at `Hint`
@@ -327,7 +344,6 @@ impl<'a> IndexBuilder<'a> {
         }
 
         let layout = Self::detect_layout(&files);
-        let source_locale = self.config.resolved_source_locale();
         let use_file_namespace = self.config.use_file_namespace();
 
         let mut trees: BTreeMap<Locale, KeyTree> = BTreeMap::new();
@@ -359,6 +375,8 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
+        let source_locale = resolve_source_locale(self.config, &trees);
+
         Ok(LocaleIndex {
             trees,
             files,
@@ -387,6 +405,23 @@ impl<'a> IndexBuilder<'a> {
             LocaleLayout::Flat
         }
     }
+}
+
+/// Use configured source locale when present; otherwise the first locale found
+/// (covers fr-only projects where `en` is configured by default).
+fn resolve_source_locale(
+    config: &ProjectConfig,
+    trees: &BTreeMap<Locale, KeyTree>,
+) -> Locale {
+    let preferred = config.resolved_source_locale();
+    if trees.contains_key(&preferred) {
+        return preferred;
+    }
+    trees
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or(preferred)
 }
 
 fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexError> {

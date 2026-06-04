@@ -22,9 +22,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy (native crates)
-        run: cargo clippy --workspace --exclude lokalize --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude lokalized --all-targets --locked -- -D warnings
       - name: cargo test (native crates)
-        run: cargo test --workspace --exclude lokalize --locked
+        run: cargo test --workspace --exclude lokalized --locked
 
   wasm:
     name: WASM extension build
@@ -38,4 +38,4 @@ jobs:
         with:
           key: wasm
       - name: cargo build (wasm32-wasip2)
-        run: cargo build -p lokalize --target wasm32-wasip2 --release --locked
+        run: cargo build -p lokalized --target wasm32-wasip2 --release --locked

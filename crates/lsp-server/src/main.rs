@@ -1,4 +1,4 @@
-//! `lokalize-lsp` — Language server binary.
+//! `lokalized-lsp` — Language server binary.
 //!
 //! - **Phase 0**: lifecycle (initialize/initialized/shutdown).
 //! - **Phase 1**: workspace indexing — discovers locale files, parses them, keeps an
@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use i18n_core::{
-    escape_md, find_usages, insert_key_json, remove_key_json, truncate_chars, IndexBuilder,
-    KeyUsage, LineIndex, LocaleFile, LocaleIndex, LocaleLayout, LocalizedValue, ParsedValue,
-    ProjectConfig, UsageIndex,
+    build_document_symbol_tree, escape_md, find_usages, insert_key_json, remove_key_json,
+    truncate_chars, DocumentSymbolNode, IndexBuilder, KeyUsage, LineIndex, LocaleFile, LocaleIndex,
+    LocaleLayout, LocalizedValue, ParsedValue, ProjectConfig, UsageIndex,
 };
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, RwLock};
@@ -24,9 +24,10 @@ use tower_lsp::lsp_types::{
     CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
     MessageType, OneOf, Position as LspPosition, Range as LspRange, ReferenceParams,
     ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
@@ -108,6 +109,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
@@ -121,7 +123,7 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         info!("-> initialized notification received");
         self.client
-            .log_message(MessageType::INFO, "Lokalize LSP ready")
+            .log_message(MessageType::INFO, "Lokalized LSP ready")
             .await;
     }
 
@@ -507,6 +509,43 @@ impl LanguageServer for Backend {
         );
         Ok(Some(symbols))
     }
+
+    /// Hierarchical key tree for the open locale file (Zed Outline / Cmd+Shift+O).
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let Ok(path) = uri.to_file_path() else {
+            return Ok(None);
+        };
+
+        if !is_indexed_locale_uri(&self.index, &uri).await {
+            return Ok(None);
+        }
+
+        let guard = self.index.read().await;
+        let Some(idx) = &*guard else {
+            return Ok(None);
+        };
+
+        let entries = idx.entries_for_file(&path);
+        if entries.is_empty() {
+            return Ok(Some(DocumentSymbolResponse::Nested(Vec::new())));
+        }
+
+        let tree = build_document_symbol_tree(&entries);
+        let symbols: Vec<DocumentSymbol> =
+            tree.into_iter().map(document_symbol_node_to_lsp).collect();
+
+        info!(
+            count = symbols.len(),
+            path = %path.display(),
+            "documentSymbol: {} top-level group(s)",
+            symbols.len()
+        );
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
 }
 
 impl Backend {
@@ -674,7 +713,7 @@ async fn compute_source_diagnostics(
                     code: Some(tower_lsp::lsp_types::NumberOrString::String(
                         "missing-key".into(),
                     )),
-                    source: Some("lokalize".into()),
+                    source: Some("lokalized".into()),
                     message: format!("Missing translation for key `{}`", u.key),
                     ..Default::default()
                 })
@@ -685,7 +724,7 @@ async fn compute_source_diagnostics(
                     code: Some(tower_lsp::lsp_types::NumberOrString::String(
                         "missing-source".into(),
                     )),
-                    source: Some("lokalize".into()),
+                    source: Some("lokalized".into()),
                     message: format!("Key `{}` is missing from source locale `{}`", u.key, source),
                     ..Default::default()
                 })
@@ -763,7 +802,7 @@ async fn compute_locale_diagnostics(
             code: Some(tower_lsp::lsp_types::NumberOrString::String(
                 "unused-key".into(),
             )),
-            source: Some("lokalize".into()),
+            source: Some("lokalized".into()),
             message: format!(
                 "Translation key `{key}` is not referenced by any scanned source file."
             ),
@@ -843,6 +882,30 @@ fn to_lsp_range(r: &i18n_core::Range) -> LspRange {
     LspRange {
         start: to_lsp_position(&r.start),
         end: to_lsp_position(&r.end),
+    }
+}
+
+fn document_symbol_node_to_lsp(node: DocumentSymbolNode) -> DocumentSymbol {
+    let children = if node.children.is_empty() {
+        None
+    } else {
+        Some(
+            node.children
+                .into_iter()
+                .map(document_symbol_node_to_lsp)
+                .collect(),
+        )
+    };
+    #[allow(deprecated)]
+    DocumentSymbol {
+        name: node.name,
+        detail: node.detail,
+        kind: SymbolKind::KEY,
+        tags: None,
+        deprecated: None,
+        range: to_lsp_range(&node.range),
+        selection_range: to_lsp_range(&node.key_range),
+        children,
     }
 }
 
@@ -1148,7 +1211,7 @@ async fn build_fill_missing_actions(idx: &LocaleIndex, key: &str) -> Vec<CodeAct
             .and_then(|s| s.to_str())
             .unwrap_or("?");
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Lokalize: Create `{key}` in {locale} (`{filename}`)"),
+            title: format!("Lokalized: Create `{key}` in {locale} (`{filename}`)"),
             kind: Some(CodeActionKind::QUICKFIX),
             edit: Some(WorkspaceEdit {
                 changes: Some(changes),
@@ -1218,7 +1281,7 @@ async fn build_locale_code_actions(
 
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
     Some(vec![CodeActionOrCommand::CodeAction(CodeAction {
-        title: format!("Lokalize: Remove unused key `{full_key}` from `{filename}`"),
+        title: format!("Lokalized: Remove unused key `{full_key}` from `{filename}`"),
         kind: Some(CodeActionKind::QUICKFIX),
         edit: Some(WorkspaceEdit {
             changes: Some(changes),
@@ -1417,7 +1480,7 @@ async fn build_indexes_for_roots(
                 let summary = index_summary(&index);
                 info!(root = %root.display(), "{summary}");
                 client
-                    .log_message(MessageType::INFO, format!("Lokalize: {summary}"))
+                    .log_message(MessageType::INFO, format!("Lokalized: {summary}"))
                     .await;
                 *index_slot.write().await = Some(index);
 
@@ -1442,7 +1505,7 @@ async fn build_indexes_for_roots(
                     );
                     info!("{summary}");
                     scan_client
-                        .log_message(MessageType::INFO, format!("Lokalize: {summary}"))
+                        .log_message(MessageType::INFO, format!("Lokalized: {summary}"))
                         .await;
                     *scan_slot.write().await = usages;
                     // Now that the reverse index is populated, push fresh
@@ -1574,7 +1637,7 @@ async fn start_watcher(
                 let summary = index_summary(&index);
                 info!(root = %root.display(), "{summary} (reload)");
                 client
-                    .log_message(MessageType::INFO, format!("Lokalize: {summary} (reload)"))
+                    .log_message(MessageType::INFO, format!("Lokalized: {summary} (reload)"))
                     .await;
                 *index_slot.write().await = Some(index);
                 // Disk rebuild would stomp unsaved edits in open locale buffers;
@@ -1624,13 +1687,16 @@ async fn republish_all_diagnostics(
 fn init_tracing() {
     use std::sync::Mutex;
 
-    let filter = EnvFilter::try_from_env("LOKALIZE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("LOKALIZED_LOG")
+        .or_else(|_| EnvFilter::try_from_env("LOKALIZE_LOG"))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Also log to a file we can inspect outside Zed. Zed captures LSP stdout
     // (JSON-RPC) and ignores stderr, so a dedicated file is the most reliable
     // way to observe the server's internal state.
-    let log_path =
-        std::env::var("LOKALIZE_LOG_FILE").unwrap_or_else(|_| "/tmp/lokalize-lsp.log".to_string());
+    let log_path = std::env::var("LOKALIZED_LOG_FILE")
+        .or_else(|_| std::env::var("LOKALIZE_LOG_FILE"))
+        .unwrap_or_else(|_| "/tmp/lokalized-lsp.log".to_string());
 
     let file = std::fs::OpenOptions::new()
         .create(true)

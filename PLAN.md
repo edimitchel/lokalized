@@ -10,7 +10,7 @@ multi-framework.
 
 - [x] **Nouvelle extension** (pas un fork de `intl-lens`)
 - [x] **Format de config framework custom** : `.zed/i18n-ally-custom-framework.yml`
-      à l'identique d'i18n-ally (+ alias `.zed/lokalize.yml`)
+      à l'identique d'i18n-ally (+ alias `.zed/lokalized.yml`)
 - [x] **MCP + slash commands** : crate scaffoldée dès v0.1, features IA implémentées en v0.3
 - [x] **MVP étroit** : Vue + TS/JS, frameworks `vue-i18n` + `i18next`, formats JSON + YAML,
       features LSP = hover / inlay hints / go-to-def / completion / diagnostics
@@ -20,7 +20,7 @@ multi-framework.
 ## 1. Architecture cible
 
 ```
-lokalize-vue/
+lokalized/
 ├── extension.toml            # métadonnées Zed
 ├── Cargo.toml                # workspace
 ├── crates/
@@ -43,7 +43,7 @@ lokalize-vue/
 
 ## Phase 0 — Scaffolding (≈ 1-2 j)
 
-- [x] `extension.toml` (schema_version 1, id `lokalize`, language_server rattaché)
+- [x] `extension.toml` (schema_version 1, id `lokalized`, language_server rattaché)
 - [x] Workspace `Cargo.toml` (resolver 2, 4 membres, `default-members = ["."]`)
 - [x] WASM extension au root : `crate-type = ["cdylib"]`, `zed_extension_api = "0.7"`,
       impl de `Extension` avec `language_server_command` (résolution `LOKALIZE_LSP_PATH` → `which`)
@@ -53,7 +53,7 @@ lokalize-vue/
 - [x] CI GitHub Actions : `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` + build WASM
 - [x] Workflow `release.yml` déclenché par tag `v*`, matrix 5 cibles (linux x64/arm64, macos x64/arm64, windows x64)
 - [x] README initial (install dev, architecture, commandes utiles)
-- [x] Scaffold buildable : `cargo check` natif ✅, `cargo build --target wasm32-wasip2` ✅ (lokalize.wasm 166 KB)
+- [x] Scaffold buildable : `cargo check` natif ✅, `cargo build --target wasm32-wasip2` ✅ (lokalized.wasm 166 KB)
 - [x] Premier commit installable via `zed: install dev extension` (✅ extension chargée dans Zed)
 
 ---
@@ -62,7 +62,7 @@ lokalize-vue/
 
 ### Détection du projet
 
-- [x] Scan du worktree à l'ouverture, lecture `.zed/lokalize.json` (`config::ProjectConfig::load`)
+- [x] Scan du worktree à l'ouverture, lecture `.zed/lokalized.json` (`config::ProjectConfig::load`)
 - [x] Heuristiques fallback : `locales/`, `src/locales/`, `i18n/`, `public/locales/`, `lib/l10n/`, `app/locales/`, `assets/locales/`
 - [x] Détection structure : **flat** (`en.json`) vs **nested** (`en/common.json`) (`IndexBuilder::detect_layout`)
 - [x] Détection de la `sourceLocale` (défaut `en`, override par config)
@@ -99,7 +99,7 @@ lokalize-vue/
 ### Intégration LSP
 
 - [x] Le LSP charge `ProjectConfig` + construit `LocaleIndex` au `initialize` (async, non bloquant)
-- [x] Log structuré du résultat dans Zed log : `Lokalize: indexed N locales, M files, K keys`
+- [x] Log structuré du résultat dans Zed log : `Lokalized: indexed N locales, M files, K keys`
 - [x] `Arc<RwLock<Option<LocaleIndex>>>` partagé, prêt pour les handlers hover/inlay/def (Phase 3)
 
 ---
@@ -156,7 +156,7 @@ lokalize-vue/
 
 ### Config workspace
 
-- [x] Lecture de `.zed/lokalize.json` côté LSP (`ProjectConfig::load`)
+- [x] Lecture de `.zed/lokalized.json` côté LSP (`ProjectConfig::load`)
 - [ ] Réception de `workspace/configuration` via LSP standard (Phase 3.5)
 - [ ] Rechargement à chaud sur `workspace/didChangeConfiguration` (Phase 3.5)
 
@@ -180,7 +180,7 @@ lokalize-vue/
 - [x] Index partagé `Arc<RwLock<Option<LocaleIndex>>>`
 - [x] Construction de l'index hors-main-thread via `spawn_blocking` (handshake instant)
 - [ ] Parsing des locales en parallèle avec `rayon` (Phase 1.5)
-- [ ] Cache disque dans `$XDG_CACHE_HOME/lokalize/<hash>.bin` (bincode) (Phase 6)
+- [ ] Cache disque dans `$XDG_CACHE_HOME/lokalized/<hash>.bin` (bincode) (Phase 6)
 
 ### Hot reload (file watcher)
 
@@ -229,7 +229,7 @@ lokalize-vue/
 - [ ] Outil `i18n.translate_key(key, target_locale, engine)` — appel DeepL/OpenAI
 - [ ] Outil `i18n.extract(text, file_context)` — suggestion + création
 - [ ] Config des engines via env (`LOKALIZE_DEEPL_KEY`, `OPENAI_API_KEY`)
-      ou section `ai` de `.zed/lokalize.json`
+      ou section `ai` de `.zed/lokalized.json`
 - [ ] Déclaration dans `extension.toml` + `context_server_command`
 
 ---
@@ -343,14 +343,14 @@ l'équipe Zed. Décisions tech proposées :
 
 Notre cas d'usage est **explicitement nommé** comme cible Phase 3.
 
-### Implications pour Lokalize
+### Implications pour Lokalized
 
 - **Court terme** : pas de panneau possible, on reste sur LSP + slash commands
   + MCP. Architecture actuelle (logique pure dans `i18n-core`, façade LSP fine)
   est compatible : si l'API panneau sort, on ajoute une crate `panel-extension`
   qui consomme `i18n-core` et expose l'API WIT.
 - **Moyen terme** : si Phase 1 sort, on peut afficher un status bar item
-  *"Lokalize: 32 missing in fr"*.
+  *"Lokalized: 32 missing in fr"*.
 - **Long terme** : Phase 3 ouvrirait un vrai concurrent d'i18n-ally VSCode
   (édition inline, tableaux par locale, bulk ops).
 - **Risque** : le RFC peut traîner / être rejeté. **Aucune garantie**. Plan B
@@ -363,8 +363,8 @@ Ordre recommandé (effort / valeur croissants) :
 - [ ] **Document Symbols** (`textDocument/documentSymbol`) sur fichiers locale
       → mini-tree-view dans la sidebar Outline de Zed, fuzzy via Cmd+Shift+O.
       ~1h. Quick win.
-- [ ] **Slash commands ciblés** dans l'Assistant : `/lokalize-missing`,
-      `/lokalize-stats`, `/lokalize-unused`. Avec
+- [ ] **Slash commands ciblés** dans l'Assistant : `/lokalized-missing`,
+      `/lokalized-stats`, `/lokalized-unused`. Avec
       `complete_slash_command_argument` pour autocomplete des clés.
 - [ ] **Buffer virtuel "dashboard"** généré à la demande : Markdown navigable
       avec liens `file://` cliquables (tableau de complétude par locale,

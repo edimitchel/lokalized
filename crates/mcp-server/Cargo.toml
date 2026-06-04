@@ -1,15 +1,23 @@
 [package]
-name = "lokalize-mcp"
+name = "lokalized-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "MCP server exposing i18n operations to the Zed Assistant (planned for v0.3)"
+description = "MCP server exposing i18n operations to the Zed Assistant"
 
 [[bin]]
-name = "lokalize-mcp"
+name = "lokalized-mcp"
 path = "src/main.rs"
 
 [dependencies]
 i18n-core.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
