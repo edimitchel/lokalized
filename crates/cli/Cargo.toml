@@ -1,0 +1,30 @@
+[package]
+name = "lokalized-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone CLI and GUI for Lokalized i18n workflows"
+
+[[bin]]
+name = "lokalized"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui"]
+
+[dependencies]
+i18n-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+eframe = { version = "0.31", optional = true, default-features = true }
+egui = { version = "0.31", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

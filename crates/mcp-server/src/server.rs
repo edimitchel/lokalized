@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use i18n_core::{
-    parse_linked_message, resolve_value, set_key_json, IndexBuilder, Locale, LocaleIndex,
-    ProjectConfig, ResolvedValue,
+    parse_linked_message, resolve_value, set_key_json, Locale, LocaleIndex, ProjectSnapshot,
+    ResolvedValue,
 };
 use rmcp::{
     handler::server::wrapper::Parameters, schemars::JsonSchema, tool, tool_handler, tool_router,
@@ -103,15 +103,8 @@ impl LokalizedMcp {
 }
 
 fn build_index(workspace: &Path) -> Result<LocaleIndex, String> {
-    let config = ProjectConfig::load(workspace);
-    if config.locale_paths.is_empty() {
-        return Err(format!(
-            "no locale directories found under {}",
-            workspace.display()
-        ));
-    }
-    IndexBuilder::new(workspace, &config)
-        .build()
+    ProjectSnapshot::load(workspace)
+        .map(|snap| snap.index)
         .map_err(|e| e.to_string())
 }
 

@@ -58,6 +58,31 @@ Also enable **Lokalized** under **Agent → Settings**. The key must be `lokaliz
 (see `extension.toml`). Do **not** set `command` / `args` alone — Zed would expect a
 custom stdio server.
 
+### 5. Standalone CLI and GUI (optional)
+
+Build the all-in-one binary (translation checks + desktop UI):
+
+```bash
+cargo build -p lokalized-cli --release
+cp target/release/lokalized ~/.cargo/bin/
+```
+
+**CI** — fail the job when locales are incomplete or files do not parse:
+
+```bash
+lokalized check --workspace . --format json
+```
+
+Other commands: `validate`, `missing`, `unused`, `keys list`, `get`, `set`, `stats`.
+
+**Translation management UI**:
+
+```bash
+lokalized gui --workspace .
+```
+
+Edits JSON locale files in a key × locale grid (same index rules as the LSP).
+
 ---
 
 ## Configuration
@@ -276,6 +301,7 @@ No release is published yet. Build and install binaries (see [Quick start](#2-in
 | `lokalized-lsp` | native binary | Language server |
 | `i18n-core` | native lib | Locale index, parsers, framework detection |
 | `lokalized-mcp` | native binary | MCP server for the Zed Assistant |
+| `lokalized` (`lokalized-cli`) | native binary | CLI for CI + egui translation UI |
 
 ## Development
 
@@ -285,7 +311,7 @@ cargo build -p lokalized --target wasm32-wasip2 --release
 cp target/wasm32-wasip2/release/lokalized.wasm extension.wasm
 
 # Native binaries
-cargo build -p lokalized-lsp -p lokalized-mcp --release
+cargo build -p lokalized-lsp -p lokalized-mcp -p lokalized-cli --release
 
 # Tests & lint
 cargo test  --workspace --exclude lokalized

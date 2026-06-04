@@ -19,6 +19,7 @@ members = [
     "crates/i18n-core",
     "crates/lsp-server",
     "crates/mcp-server",
+    "crates/cli",
 ]
 default-members = ["."]
 resolver = "2"

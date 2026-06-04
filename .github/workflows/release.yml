@@ -51,6 +51,9 @@ jobs:
       - name: Build lokalized-mcp
         run: cargo build -p lokalized-mcp --release --target ${{ matrix.target }} --locked
 
+      - name: Build lokalized (CLI + GUI)
+        run: cargo build -p lokalized-cli --release --target ${{ matrix.target }} --locked
+
       - name: Package binaries
         shell: bash
         run: |
@@ -61,6 +64,8 @@ jobs:
              "dist/lokalized-lsp-${{ matrix.target }}${ext}"
           cp "target/${{ matrix.target }}/release/lokalized-mcp${ext}" \
              "dist/lokalized-mcp-${{ matrix.target }}${ext}"
+          cp "target/${{ matrix.target }}/release/lokalized${ext}" \
+             "dist/lokalized-${{ matrix.target }}${ext}"
 
       - uses: actions/upload-artifact@v4
         with:

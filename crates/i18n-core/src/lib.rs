@@ -13,6 +13,7 @@ pub mod mutation;
 pub mod parser;
 pub mod paths;
 pub mod position;
+pub mod project;
 pub mod scan;
 pub mod symbols;
 
@@ -29,6 +30,7 @@ pub use locale::{Locale, LocaleFile, LocaleLayout};
 pub use mutation::{detect_indent, insert_key_json, remove_key_json, set_key_json, MutationError};
 pub use parser::{parse_file, LocaleEntry, LocaleParser, ParseError};
 pub use paths::{normalize_path, paths_equal};
+pub use project::{ParseIssue, ProjectError, ProjectSnapshot};
 pub use position::{LineIndex, Position, Range};
 pub use scan::UsageIndex;
 pub use symbols::{build_document_symbol_tree, DocumentSymbolNode};

@@ -296,6 +296,19 @@ lokalized/
 
 ---
 
+## Phase 7b — Application standalone `lokalized` (CLI + GUI)
+
+- [x] `i18n-core::project::ProjectSnapshot` (index + usage scan)
+- [x] Crate `lokalized-cli` → binaire `lokalized`
+- [x] CLI CI : `check`, `validate`, `missing`, `unused`, `keys list`, `get`, `set`, `stats` (`--format json`)
+- [x] GUI egui : `lokalized gui` (grille clés × locales, édition JSON)
+- [x] Release GitHub : artefact `lokalized-{target}` aux côtés de LSP/MCP
+- [ ] `--ignore-unused` sur `check` pour CI sans scan source complet
+- [ ] Export Markdown/CSV dashboard
+- [ ] Édition YAML via mutations dédiées
+
+---
+
 ## Phase 8 — UX panneau & veille Zed Extensions API
 
 > Section ajoutée le 27 avril 2026 après recherche sur les annonces Zed
