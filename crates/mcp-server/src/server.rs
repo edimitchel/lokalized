@@ -186,10 +186,7 @@ impl LokalizedMcp {
                         "chain": chain,
                     });
                 }
-                ResolvedValue::Broken {
-                    target_key,
-                    reason,
-                } => {
+                ResolvedValue::Broken { target_key, reason } => {
                     out["resolved"] = serde_json::Value::Null;
                     out["linkError"] = serde_json::json!({
                         "target": target_key,

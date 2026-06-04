@@ -341,9 +341,6 @@ mod mg_shop_usage_tests {
 "#;
         let usages = find_usages(src, "Vue.js");
         let keys: Vec<_> = usages.iter().map(|u| u.key.as_str()).collect();
-        assert!(
-            keys.contains(&"global.cantSelect"),
-            "keys found: {keys:?}"
-        );
+        assert!(keys.contains(&"global.cantSelect"), "keys found: {keys:?}");
     }
 }

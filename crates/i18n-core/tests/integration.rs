@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use i18n_core::{
-    resolve_value, IndexBuilder, Locale, LocaleLayout, ProjectConfig, ResolvedValue,
-};
+use i18n_core::{resolve_value, IndexBuilder, Locale, LocaleLayout, ProjectConfig, ResolvedValue};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -150,7 +148,9 @@ fn namespace_false_keeps_json_root_keys_without_filename_prefix() {
         namespace: Some(false),
         ..ProjectConfig::default()
     };
-    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+    let index = IndexBuilder::new(dir.path(), &config)
+        .build()
+        .expect("build");
 
     assert!(
         index.lookup("slots.title").contains_key(&Locale::new("en")),
@@ -178,7 +178,9 @@ fn namespace_true_avoids_double_prefix_when_json_is_self_wrapped() {
         namespace: Some(true),
         ..ProjectConfig::default()
     };
-    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+    let index = IndexBuilder::new(dir.path(), &config)
+        .build()
+        .expect("build");
 
     assert!(index.lookup("slots.title").contains_key(&Locale::new("en")));
     assert!(index.lookup("slots.slots.title").is_empty());
@@ -203,13 +205,13 @@ fn namespace_true_prepends_stem_for_flat_json_content() {
         namespace: Some(true),
         ..ProjectConfig::default()
     };
-    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+    let index = IndexBuilder::new(dir.path(), &config)
+        .build()
+        .expect("build");
 
-    assert!(
-        index
-            .lookup("common.actions.submit")
-            .contains_key(&Locale::new("en"))
-    );
+    assert!(index
+        .lookup("common.actions.submit")
+        .contains_key(&Locale::new("en")));
 }
 
 #[test]
@@ -232,10 +234,14 @@ fn nuxt_per_locale_folder_indexes_global_cant_select() {
         source_locale: Some("fr".into()),
         ..ProjectConfig::default()
     };
-    let index = IndexBuilder::new(dir.path(), &config).build().expect("build");
+    let index = IndexBuilder::new(dir.path(), &config)
+        .build()
+        .expect("build");
     assert_eq!(index.source_locale.as_str(), "fr");
     assert!(
-        index.lookup("global.cantSelect").contains_key(&Locale::new("fr")),
+        index
+            .lookup("global.cantSelect")
+            .contains_key(&Locale::new("fr")),
         "trees={:?}",
         index.trees.keys().collect::<Vec<_>>()
     );
@@ -257,7 +263,11 @@ fn linked_messages_resolve_through_index() {
     assert_eq!(alias.value, "@:common.providers.payfip");
 
     match resolve_value(&index, &Locale::new("en"), &alias.value) {
-        ResolvedValue::Linked { display, target_key, .. } => {
+        ResolvedValue::Linked {
+            display,
+            target_key,
+            ..
+        } => {
             assert_eq!(target_key, "common.providers.payfip");
             assert_eq!(display, "PayFiP");
         }

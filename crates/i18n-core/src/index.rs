@@ -453,19 +453,12 @@ pub fn key_path_in_file(
 
 /// Use configured source locale when present; otherwise the first locale found
 /// (covers fr-only projects where `en` is configured by default).
-fn resolve_source_locale(
-    config: &ProjectConfig,
-    trees: &BTreeMap<Locale, KeyTree>,
-) -> Locale {
+fn resolve_source_locale(config: &ProjectConfig, trees: &BTreeMap<Locale, KeyTree>) -> Locale {
     let preferred = config.resolved_source_locale();
     if trees.contains_key(&preferred) {
         return preferred;
     }
-    trees
-        .keys()
-        .next()
-        .cloned()
-        .unwrap_or(preferred)
+    trees.keys().next().cloned().unwrap_or(preferred)
 }
 
 fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexError> {

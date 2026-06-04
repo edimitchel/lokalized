@@ -45,9 +45,10 @@ pub struct ParseIssue {
 impl ProjectSnapshot {
     /// Discover config, build the locale index, and scan source usages.
     pub fn load(root: impl AsRef<Path>) -> Result<Self, ProjectError> {
-        let root = root.as_ref().canonicalize().map_err(|_| {
-            ProjectError::WorkspaceNotFound(root.as_ref().to_path_buf())
-        })?;
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .map_err(|_| ProjectError::WorkspaceNotFound(root.as_ref().to_path_buf()))?;
 
         let config = ProjectConfig::load(&root);
         if config.locale_paths.is_empty() {
@@ -145,7 +146,9 @@ mod tests {
         assert_eq!(snap.index.source_locale.as_str(), "en");
         assert!(!snap.index.all_keys().is_empty());
         let missing = snap.missing_by_locale(None);
-        assert!(missing.get("fr").is_some_and(|m| m.contains(&"common.actions.cancel".to_string())));
+        assert!(missing
+            .get("fr")
+            .is_some_and(|m| m.contains(&"common.actions.cancel".to_string())));
     }
 
     #[test]

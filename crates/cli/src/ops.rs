@@ -16,8 +16,8 @@ pub struct Context {
 
 impl Context {
     pub fn load(workspace: PathBuf, format: OutputFormat) -> anyhow::Result<Self> {
-        let snapshot =
-            ProjectSnapshot::load(&workspace).map_err(|e| map_project_error(workspace.clone(), e))?;
+        let snapshot = ProjectSnapshot::load(&workspace)
+            .map_err(|e| map_project_error(workspace.clone(), e))?;
         Ok(Self { format, snapshot })
     }
 }
@@ -72,7 +72,11 @@ pub fn run_unused(ctx: &Context) -> anyhow::Result<i32> {
     Ok(if unused.is_empty() { 0 } else { 1 })
 }
 
-pub fn run_keys_list(ctx: &Context, prefix: Option<&str>, locale: Option<&str>) -> anyhow::Result<i32> {
+pub fn run_keys_list(
+    ctx: &Context,
+    prefix: Option<&str>,
+    locale: Option<&str>,
+) -> anyhow::Result<i32> {
     let prefix = prefix.unwrap_or("");
     let locale_filter = locale.map(Locale::new);
     let mut keys: Vec<String> = ctx
@@ -82,9 +86,9 @@ pub fn run_keys_list(ctx: &Context, prefix: Option<&str>, locale: Option<&str>) 
         .into_iter()
         .filter(|k| prefix.is_empty() || k.starts_with(prefix))
         .filter(|k| {
-            locale_filter.as_ref().is_none_or(|loc| {
-                ctx.snapshot.index.lookup(k).contains_key(loc)
-            })
+            locale_filter
+                .as_ref()
+                .is_none_or(|loc| ctx.snapshot.index.lookup(k).contains_key(loc))
         })
         .collect();
     keys.sort();
@@ -219,7 +223,8 @@ pub fn run_set(ctx: &Context, key: &str, locale: &str, value: &str) -> anyhow::R
 
     let content = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
     let segments: Vec<&str> = key.split('.').collect();
-    let new_content = set_key_json(&content, &segments, value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let new_content =
+        set_key_json(&content, &segments, value).map_err(|e| anyhow::anyhow!("{e}"))?;
     std::fs::write(&path, &new_content).with_context(|| path.display().to_string())?;
 
     let out = serde_json::json!({
@@ -233,8 +238,7 @@ pub fn run_set(ctx: &Context, key: &str, locale: &str, value: &str) -> anyhow::R
 }
 
 pub fn workspace_path(workspace: Option<PathBuf>) -> PathBuf {
-    workspace
-        .unwrap_or_else(|| std::env::current_dir().expect("cwd"))
+    workspace.unwrap_or_else(|| std::env::current_dir().expect("cwd"))
 }
 
 #[cfg(test)]
@@ -243,8 +247,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn nested_fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../i18n-core/tests/fixtures/nested_project")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../i18n-core/tests/fixtures/nested_project")
     }
 
     #[test]

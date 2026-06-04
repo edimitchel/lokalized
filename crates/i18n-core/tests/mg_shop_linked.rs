@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use i18n_core::{resolve_value, IndexBuilder, Locale, ProjectConfig, ResolvedValue};
+use std::path::PathBuf;
 
 #[test]
 fn mg_shop_linked_payfip_resolves() {

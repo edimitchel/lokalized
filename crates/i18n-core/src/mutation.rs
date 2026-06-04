@@ -161,6 +161,59 @@ fn set_into_value(root: &mut Value, path: &[&str], value: &str) -> Result<(), Mu
     Ok(())
 }
 
+/// Rename a leaf key in a JSON document (`from` → `to`), preserving its string value.
+///
+/// Fails if `from` is missing or `to` already exists.
+pub fn rename_key_json(content: &str, from: &[&str], to: &[&str]) -> Result<String, MutationError> {
+    if from.is_empty() || to.is_empty() {
+        return Err(MutationError::EmptyPath);
+    }
+    if from == to {
+        return Ok(content.to_string());
+    }
+
+    let mut root: Value = serde_json::from_str(content).map_err(MutationError::Parse)?;
+    let value = take_string_at_path(&mut root, from)
+        .ok_or_else(|| MutationError::KeyNotFound(from.join(".")))?;
+
+    if value_at_path(&root, to).is_some() {
+        return Err(MutationError::KeyAlreadyExists(to.join(".")));
+    }
+
+    let indent = detect_indent(content);
+    let trailing_newline = content.ends_with('\n');
+
+    insert_into_value(&mut root, to, &value)?;
+
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    root.serialize(&mut ser).map_err(MutationError::Serialize)?;
+
+    let mut out = String::from_utf8(buf).expect("serde_json emits UTF-8");
+    if trailing_newline && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn value_at_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = root;
+    for part in path {
+        current = current.as_object()?.get(*part)?;
+    }
+    Some(current)
+}
+
+/// Remove the leaf at `path` and return its string value.
+fn take_string_at_path(root: &mut Value, path: &[&str]) -> Option<String> {
+    let value = value_at_path(root, path)?.as_str()?.to_string();
+    if !remove_from_value(root, path) {
+        return None;
+    }
+    Some(value)
+}
+
 /// Remove the leaf key at `path` from a JSON document.
 ///
 /// - Empty intermediate objects left behind by the removal are pruned
@@ -431,6 +484,26 @@ mod tests {
     fn errors_on_empty_path() {
         let err = insert_key_json("{}", &[], "x").unwrap_err();
         assert!(matches!(err, MutationError::EmptyPath));
+    }
+
+    #[test]
+    fn rename_key_moves_value() {
+        let input = r#"{
+  "old": "Hello",
+  "other": "Stay"
+}
+"#;
+        let out = rename_key_json(input, &["old"], &["new"]).unwrap();
+        assert!(!out.contains("\"old\""));
+        assert!(out.contains("\"new\": \"Hello\""));
+        assert!(out.contains("\"other\": \"Stay\""));
+    }
+
+    #[test]
+    fn rename_key_errors_when_target_exists() {
+        let input = r#"{"a": "1", "b": "2"}"#;
+        let err = rename_key_json(input, &["a"], &["b"]).unwrap_err();
+        assert!(matches!(err, MutationError::KeyAlreadyExists(_)));
     }
 
     #[test]

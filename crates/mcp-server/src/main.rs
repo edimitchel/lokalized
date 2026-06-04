@@ -16,13 +16,13 @@ use tracing_subscriber::EnvFilter;
 use server::LokalizedMcp;
 
 fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|v| !v.is_empty())
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 fn resolve_workspace() -> PathBuf {
-    if let Some(root) = env_nonempty("LOKALIZED_WORKSPACE").or_else(|| env_nonempty("LOKALIZE_WORKSPACE")) {
+    if let Some(root) =
+        env_nonempty("LOKALIZED_WORKSPACE").or_else(|| env_nonempty("LOKALIZE_WORKSPACE"))
+    {
         return PathBuf::from(root);
     }
     let mut args = std::env::args().skip(1);

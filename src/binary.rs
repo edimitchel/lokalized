@@ -126,8 +126,7 @@ fn home_cargo_bin(binary_name: &str) -> Option<String> {
         .join(".cargo")
         .join("bin")
         .join(local_binary_filename(binary_name));
-    path.is_file()
-        .then(|| path.display().to_string())
+    path.is_file().then(|| path.display().to_string())
 }
 
 /// If `lokalized-lsp` is on PATH (e.g. `~/.cargo/bin`), look for `lokalized-mcp` next to it.
@@ -209,8 +208,7 @@ fn cargo_build_binary(binary_name: &str) -> Option<String> {
     let built = root
         .join("target/release")
         .join(local_binary_filename(binary_name));
-    built.is_file()
-        .then(|| built.display().to_string())
+    built.is_file().then(|| built.display().to_string())
 }
 
 /// Previously downloaded release in the extension working directory.
@@ -239,9 +237,7 @@ fn path_exists(path: &str) -> bool {
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|v| !v.is_empty())
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 fn release_asset_name(binary_name: &str) -> zed::Result<String> {
@@ -284,9 +280,9 @@ fn download_release_binary(
         );
     }
 
-    let release = fetch_github_release(false).or_else(|_| fetch_github_release(true)).map_err(|_| {
-        no_binary_help(binary_name)
-    })?;
+    let release = fetch_github_release(false)
+        .or_else(|_| fetch_github_release(true))
+        .map_err(|_| no_binary_help(binary_name))?;
 
     let asset_name = release_asset_name(binary_name)?;
     let asset = release

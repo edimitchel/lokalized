@@ -29,10 +29,10 @@ use tower_lsp::lsp_types::{
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, OneOf, Position as LspPosition, Range as LspRange, ReferenceParams,
-    ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    Position as LspPosition, Range as LspRange, ReferenceParams, ServerCapabilities, ServerInfo,
+    SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
@@ -1190,10 +1190,7 @@ fn build_locale_linked_inlay_hint(
     let preview = if broken {
         display.clone()
     } else {
-        truncate_chars(
-            &ParsedValue::parse(&display).primary_form(),
-            60,
-        )
+        truncate_chars(&ParsedValue::parse(&display).primary_form(), 60)
     };
     let label = if broken {
         format!(" {preview}")
@@ -1283,10 +1280,9 @@ fn format_locale_value_markdown(locale: &Locale, raw: &str, idx: &LocaleIndex) -
                 hops
             )
         }
-        ResolvedValue::Broken {
-            target_key,
-            reason,
-        } => format!("⛔ {reason}: `{target_key}` (raw: `{}`)", escape_md(raw)),
+        ResolvedValue::Broken { target_key, reason } => {
+            format!("⛔ {reason}: `{target_key}` (raw: `{}`)", escape_md(raw))
+        }
     }
 }
 
@@ -1339,8 +1335,7 @@ fn format_hover_markdown(
     }
 
     // Footer: clickable links to every locale file. Sorted by locale.
-    let mut files: Vec<(&Locale, &LocalizedValue)> =
-        values.iter().map(|(l, v)| (*l, *v)).collect();
+    let mut files: Vec<(&Locale, &LocalizedValue)> = values.iter().map(|(l, v)| (*l, *v)).collect();
     files.sort_by_key(|(l, _)| l.to_string());
 
     md.push_str("---\n**Open translation file:**\n\n");

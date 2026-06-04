@@ -27,11 +27,13 @@ pub use linked::{
     apply_modifier, parse_linked_message, resolve_value, LinkedMessage, ResolvedValue,
 };
 pub use locale::{Locale, LocaleFile, LocaleLayout};
-pub use mutation::{detect_indent, insert_key_json, remove_key_json, set_key_json, MutationError};
+pub use mutation::{
+    detect_indent, insert_key_json, remove_key_json, rename_key_json, set_key_json, MutationError,
+};
 pub use parser::{parse_file, LocaleEntry, LocaleParser, ParseError};
 pub use paths::{normalize_path, paths_equal};
-pub use project::{ParseIssue, ProjectError, ProjectSnapshot};
 pub use position::{LineIndex, Position, Range};
+pub use project::{ParseIssue, ProjectError, ProjectSnapshot};
 pub use scan::UsageIndex;
 pub use symbols::{build_document_symbol_tree, DocumentSymbolNode};
 

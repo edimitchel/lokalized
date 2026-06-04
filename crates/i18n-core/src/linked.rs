@@ -220,7 +220,11 @@ mod tests {
             config: Default::default(),
         };
         match resolve_value(&idx, &Locale::new("fr"), "@:global.providers.payfip") {
-            ResolvedValue::Linked { display, target_key, .. } => {
+            ResolvedValue::Linked {
+                display,
+                target_key,
+                ..
+            } => {
                 assert_eq!(target_key, "global.providers.payfip");
                 assert_eq!(display, "PayFiP");
             }

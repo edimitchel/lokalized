@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-
 use i18n_core::ParseIssue;
 use serde::Serialize;
 
@@ -92,4 +91,3 @@ fn print_json_value(v: &serde_json::Value, indent: usize) {
         }
     }
 }
-
