@@ -1190,7 +1190,7 @@ fn build_locale_linked_inlay_hint(
     let preview = if broken {
         display.clone()
     } else {
-        truncate_chars(&ParsedValue::parse(&display).primary_form(), 60)
+        truncate_chars(ParsedValue::parse(&display).primary_form(), 60)
     };
     let label = if broken {
         format!(" {preview}")
