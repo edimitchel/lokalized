@@ -130,7 +130,10 @@ common:
         let src = "hello: Hi\n";
         let e = entries(src);
         assert_eq!(&src[e[0].range.start.offset..e[0].range.end.offset], "Hi");
-        assert_eq!(&src[e[0].key_range.start.offset..e[0].key_range.end.offset], "hello");
+        assert_eq!(
+            &src[e[0].key_range.start.offset..e[0].key_range.end.offset],
+            "hello"
+        );
         assert!(e[0].key_range.end.offset <= e[0].range.start.offset);
     }
 
