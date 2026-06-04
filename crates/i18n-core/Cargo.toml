@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 jsonc-parser.workspace = true
+saphyr.workspace = true
 walkdir.workspace = true
 regex.workspace = true
 

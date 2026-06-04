@@ -1,6 +1,7 @@
 //! Parsers for locale file formats (JSON, YAML, ARB, PHP, PO, …) with source positions.
 
 pub mod json;
+pub mod yaml;
 
 use std::path::Path;
 
@@ -51,6 +52,7 @@ pub fn parse_file(path: &Path) -> Result<Vec<LocaleEntry>, ParseError> {
 pub fn parse_with_extension(source: &str, path: &Path) -> Result<Vec<LocaleEntry>, ParseError> {
     match path.extension().and_then(|s| s.to_str()) {
         Some("json" | "jsonc" | "json5" | "arb") => json::JsonParser.parse(source),
+        Some("yml" | "yaml") => yaml::YamlParser.parse(source),
         Some(other) => Err(ParseError::Unsupported(other.to_string())),
         None => Err(ParseError::Unsupported(path.display().to_string())),
     }

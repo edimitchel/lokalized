@@ -402,7 +402,7 @@ fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexErr
         let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !matches!(ext, "json" | "jsonc" | "json5" | "arb") {
+        if !matches!(ext, "json" | "jsonc" | "json5" | "arb" | "yml" | "yaml") {
             continue;
         }
         let stem = path

@@ -71,7 +71,7 @@ lokalize-vue/
 
 - [x] JSON / JSONC / JSON5 / ARB (`jsonc-parser 0.32`, positions byte/line/UTF-16)
 - [x] ARB (Flutter) — JSON + métadonnées `@key` ignorées
-- [ ] YAML (crate `yaml-rust2` ou `saphyr` + extraction positions)
+- [x] YAML (`saphyr` / `MarkedYaml` + extraction positions)
 - [ ] PHP arrays — parser regex/AST minimaliste
 - [ ] Parsers différés v0.2+ : PO/gettext, TOML, INI, Properties, Strings, XLIFF
 
@@ -93,7 +93,7 @@ lokalize-vue/
 
 - [x] Tests unitaires : positions, Locale, JSON parser, KeyTree, framework, scan, mutation, display
 - [x] Tests d'intégration avec fixtures : `nested_project` + `flat_project` + erreur "no locales"
-- [x] **78 tests verts** sur `cargo test -p i18n-core` (75 unit + 3 intégration)
+- [x] **88 tests verts** sur `cargo test -p i18n-core` (83 unit + 5 intégration)
 - [ ] Fixtures multi-framework supplémentaires (vue-i18n, Flutter ARB réel)
 
 ### Intégration LSP
@@ -262,8 +262,8 @@ lokalize-vue/
 
 ### Formats (ordre de priorité)
 
-- [ ] JSON (v0.1)
-- [ ] YAML (v0.1)
+- [x] JSON (v0.1)
+- [x] YAML (v0.1)
 - [ ] ARB (v0.2)
 - [ ] PHP arrays (v0.2)
 - [ ] PO / gettext (v0.3)

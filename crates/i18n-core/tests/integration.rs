@@ -69,6 +69,44 @@ fn flat_project_builds_complete_index() {
 }
 
 #[test]
+fn flat_yaml_project_builds_complete_index() {
+    let root = fixture("flat_project_yaml");
+    let config = ProjectConfig::auto_detect(&root);
+    let index = IndexBuilder::new(&root, &config).build().expect("build");
+
+    assert_eq!(index.layout, Some(LocaleLayout::Flat));
+    assert_eq!(index.trees.len(), 2);
+
+    let en_hello = index
+        .lookup("hello")
+        .get(&Locale::new("en"))
+        .copied()
+        .expect("en hello");
+    assert_eq!(en_hello.value, "Hi");
+    assert!(en_hello.file.ends_with("en.yml"));
+    assert!(en_hello.range.end.offset > en_hello.range.start.offset);
+}
+
+#[test]
+fn nested_yaml_project_builds_complete_index() {
+    let root = fixture("nested_project_yaml");
+    let config = ProjectConfig::auto_detect(&root);
+    let index = IndexBuilder::new(&root, &config).build().expect("build");
+
+    assert_eq!(index.layout, Some(LocaleLayout::Nested));
+    let en_submit = index
+        .lookup("common.actions.submit")
+        .get(&Locale::new("en"))
+        .copied()
+        .expect("en submit");
+    assert_eq!(en_submit.value, "Submit");
+    assert!(en_submit.file.ends_with("common.yml"));
+
+    let missing = index.missing_keys(&Locale::new("fr"));
+    assert_eq!(missing, vec!["common.actions.cancel".to_string()]);
+}
+
+#[test]
 fn missing_locale_dir_yields_no_locales_error() {
     let root = fixture("nonexistent");
     let config = ProjectConfig::auto_detect(&root);

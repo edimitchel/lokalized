@@ -1,0 +1,4 @@
+actions:
+  submit: Submit
+  cancel: Cancel
+greeting: Hello
