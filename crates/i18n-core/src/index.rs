@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectConfig;
 use crate::locale::{Locale, LocaleFile, LocaleLayout};
-use crate::parser::{parse_file, ParseError};
+use crate::parser::{parse_file, parse_with_extension, ParseError};
 use crate::position::Range;
 use crate::scan::UsageIndex;
 
@@ -61,6 +61,35 @@ impl KeyTree {
             KeyNode::Branch(sub) => sub.lookup(rest),
             _ => None,
         }
+    }
+
+    /// Recursively remove every leaf whose [`LocalizedValue::file`] matches
+    /// `target`, and garbage-collect branches that become empty as a result.
+    /// Returns `true` when at least one leaf was removed.
+    ///
+    /// Used by [`LocaleIndex::update_file_from_buffer`] to replace all entries
+    /// sourced from a single file before re-inserting the freshly parsed ones.
+    fn prune_leaves_from_file(&mut self, target: &Path) -> bool {
+        let mut changed = false;
+        self.children.retain(|_, node| match node {
+            KeyNode::Leaf(v) => {
+                if v.file == target {
+                    changed = true;
+                    false
+                } else {
+                    true
+                }
+            }
+            KeyNode::Branch(sub) => {
+                if sub.prune_leaves_from_file(target) {
+                    changed = true;
+                }
+                // Drop empty branches so the tree stays tidy; otherwise
+                // `all_keys` would keep returning stale prefixes.
+                !sub.children.is_empty()
+            }
+        });
+        changed
     }
 }
 
@@ -148,6 +177,63 @@ impl LocaleIndex {
         }
         full.extend(key_path.iter().cloned());
         full.join(".")
+    }
+
+    /// Replace every leaf previously sourced from `path` with whatever
+    /// parsing `content` yields, in place. Intended to be called from the
+    /// LSP when a locale JSON buffer changes so source-side diagnostics
+    /// (missing-key / missing-source) immediately reflect the edit without
+    /// waiting for a full index rebuild.
+    ///
+    /// Returns `true` when the index content actually changed, allowing the
+    /// caller to short-circuit diagnostic republishing when nothing moved
+    /// (e.g. pure whitespace edits on a file with a parse error).
+    ///
+    /// If `path` isn't a known locale file, the call is a no-op returning
+    /// `Ok(false)`.
+    pub fn update_file_from_buffer(
+        &mut self,
+        path: &Path,
+        content: &str,
+    ) -> Result<bool, ParseError> {
+        // Find the matching LocaleFile so we know which locale tree to
+        // touch and how to prefix the parsed key paths.
+        let Some(locale_file) = self.files.iter().find(|f| f.path == path).cloned() else {
+            return Ok(false);
+        };
+
+        // Parsing may fail on transient invalid JSON while the user is
+        // typing; surface the error so the caller can decide whether to
+        // keep the previous index or show a diagnostic.
+        let entries = parse_with_extension(content, path)?;
+
+        let tree = self.trees.entry(locale_file.locale.clone()).or_default();
+        let had_leaves = tree.prune_leaves_from_file(path);
+
+        let nested = matches!(self.layout, Some(LocaleLayout::Nested));
+        let prepend_ns = nested && self.config.use_file_namespace();
+        let mut inserted = 0usize;
+        for entry in entries {
+            let mut full_path: Vec<String> = Vec::with_capacity(entry.key_path.len() + 1);
+            if prepend_ns {
+                if let Some(ns) = &locale_file.namespace {
+                    full_path.push(ns.clone());
+                }
+            }
+            full_path.extend(entry.key_path);
+            tree.insert(
+                &full_path,
+                LocalizedValue {
+                    value: entry.value,
+                    file: path.to_path_buf(),
+                    range: entry.range,
+                    key_range: entry.key_range,
+                },
+            );
+            inserted += 1;
+        }
+
+        Ok(had_leaves || inserted > 0)
     }
 }
 
@@ -304,10 +390,7 @@ impl<'a> IndexBuilder<'a> {
 }
 
 fn scan_locale_dir(dir: &Path, out: &mut Vec<LocaleFile>) -> Result<(), IndexError> {
-    for entry in walkdir::WalkDir::new(dir)
-        .max_depth(3)
-        .follow_links(false)
-    {
+    for entry in walkdir::WalkDir::new(dir).max_depth(3).follow_links(false) {
         let entry = entry.map_err(|e| IndexError::Scan {
             path: dir.to_path_buf(),
             source: e,
@@ -436,11 +519,7 @@ mod tests {
         idx.trees.insert(Locale::new("en"), en);
 
         let mut usages = UsageIndex::new();
-        usages.update_file(
-            PathBuf::from("/x.ts"),
-            r#"t("used");"#,
-            "TypeScript",
-        );
+        usages.update_file(PathBuf::from("/x.ts"), r#"t("used");"#, "TypeScript");
 
         assert_eq!(idx.unused_keys(&usages), vec!["dead".to_string()]);
     }
@@ -473,6 +552,108 @@ mod tests {
         assert_eq!(by_file.len(), 2);
         assert_eq!(by_file[&PathBuf::from("/en.json")][0].0, "hello");
         assert_eq!(by_file[&PathBuf::from("/fr.json")][0].0, "hello");
+    }
+
+    #[test]
+    fn update_file_from_buffer_replaces_leaves_and_refreshes_missing_keys() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Project with two flat locale files; only `fr.json` starts out
+        // missing the `common.cancel` key.
+        let dir = TempDir::new().unwrap();
+        let en_path = dir.path().join("en.json");
+        let fr_path = dir.path().join("fr.json");
+        fs::write(
+            &en_path,
+            r#"{"common":{"submit":"Submit","cancel":"Cancel"}}"#,
+        )
+        .unwrap();
+        fs::write(&fr_path, r#"{"common":{"submit":"Envoyer"}}"#).unwrap();
+
+        let config = ProjectConfig {
+            source_locale: Some("en".into()),
+            locale_paths: vec![".".into()],
+            ..ProjectConfig::default()
+        };
+        let mut idx = IndexBuilder::new(dir.path(), &config).build().unwrap();
+
+        // Baseline: `common.cancel` missing in fr → present in `missing_keys`.
+        let fr = Locale::new("fr");
+        assert!(idx.missing_keys(&fr).iter().any(|k| k == "common.cancel"));
+
+        // Simulate the user adding the missing key in the buffer.
+        let changed = idx
+            .update_file_from_buffer(
+                &fr_path,
+                r#"{"common":{"submit":"Envoyer","cancel":"Annuler"}}"#,
+            )
+            .unwrap();
+        assert!(changed);
+
+        // After the buffer-level update, the key is no longer missing
+        // without having to rebuild the index from disk.
+        assert!(!idx.missing_keys(&fr).iter().any(|k| k == "common.cancel"));
+
+        // And looking the key up returns the fresh value.
+        let values = idx.lookup("common.cancel");
+        assert_eq!(values.get(&fr).map(|v| v.value.as_str()), Some("Annuler"));
+    }
+
+    #[test]
+    fn update_file_from_buffer_prunes_deleted_keys() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let en_path = dir.path().join("en.json");
+        fs::write(&en_path, r#"{"a":"A","b":"B"}"#).unwrap();
+
+        let config = ProjectConfig {
+            source_locale: Some("en".into()),
+            locale_paths: vec![".".into()],
+            ..ProjectConfig::default()
+        };
+        let mut idx = IndexBuilder::new(dir.path(), &config).build().unwrap();
+        assert!(idx.lookup("a").contains_key(&Locale::new("en")));
+
+        idx.update_file_from_buffer(&en_path, r#"{"b":"B"}"#)
+            .unwrap();
+        assert!(idx.lookup("a").is_empty(), "deleted key should vanish");
+        assert!(idx.lookup("b").contains_key(&Locale::new("en")));
+    }
+
+    #[test]
+    fn update_file_from_buffer_is_noop_for_unknown_path() {
+        let mut idx = LocaleIndex::default();
+        let changed = idx
+            .update_file_from_buffer(&PathBuf::from("/nope/en.json"), r#"{"a":"1"}"#)
+            .unwrap();
+        assert!(!changed);
+    }
+
+    #[test]
+    fn update_file_from_buffer_propagates_parse_errors() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let en_path = dir.path().join("en.json");
+        fs::write(&en_path, r#"{"a":"A"}"#).unwrap();
+
+        let config = ProjectConfig {
+            source_locale: Some("en".into()),
+            locale_paths: vec![".".into()],
+            ..ProjectConfig::default()
+        };
+        let mut idx = IndexBuilder::new(dir.path(), &config).build().unwrap();
+
+        // Mid-edit garbage: parser error must bubble up so the caller can
+        // keep the previous tree instead of corrupting the index.
+        let err = idx.update_file_from_buffer(&en_path, r#"{"a": "#);
+        assert!(err.is_err());
+        // And the pre-existing leaf survives untouched.
+        assert_eq!(idx.lookup("a").get(&Locale::new("en")).unwrap().value, "A");
     }
 
     // Suppress the unused-import warning from the enclosing module when this

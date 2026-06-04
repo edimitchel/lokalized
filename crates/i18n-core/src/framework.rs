@@ -210,14 +210,7 @@ fn framework_i18next() -> Framework {
     Framework {
         id: "i18next",
         name: "i18next",
-        language_ids: &[
-            "TypeScript",
-            "TSX",
-            "JavaScript",
-            "JSX",
-            "Vue.js",
-            "HTML",
-        ],
+        language_ids: &["TypeScript", "TSX", "JavaScript", "JSX", "Vue.js", "HTML"],
         usage_patterns: compile(&[
             // t("key") — not preceded by `$`, word chars or `.`
             r#"(?:^|[^\w$.])t\s*\(\s*['"`]({key})['"`]"#,

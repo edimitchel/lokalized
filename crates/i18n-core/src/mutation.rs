@@ -57,11 +57,7 @@ impl Error for MutationError {}
 ///
 /// Returns the new file contents. The caller is responsible for turning that
 /// into an LSP `WorkspaceEdit`.
-pub fn insert_key_json(
-    content: &str,
-    path: &[&str],
-    value: &str,
-) -> Result<String, MutationError> {
+pub fn insert_key_json(content: &str, path: &[&str], value: &str) -> Result<String, MutationError> {
     if path.is_empty() {
         return Err(MutationError::EmptyPath);
     }
@@ -85,11 +81,7 @@ pub fn insert_key_json(
     Ok(out)
 }
 
-fn insert_into_value(
-    root: &mut Value,
-    path: &[&str],
-    value: &str,
-) -> Result<(), MutationError> {
+fn insert_into_value(root: &mut Value, path: &[&str], value: &str) -> Result<(), MutationError> {
     let mut current = root;
     for (i, part) in path.iter().enumerate() {
         let is_leaf = i == path.len() - 1;

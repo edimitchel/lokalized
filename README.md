@@ -7,7 +7,9 @@ Inspired by [i18n-ally](https://github.com/lokalise/i18n-ally) (VSCode).
 
 ## Status
 
-Early alpha (Phase 0 scaffold). See [`PLAN.md`](PLAN.md) for the roadmap.
+Alpha — MVP LSP features (hover, inlay hints, go-to-def, references, completion,
+diagnostics, code actions) for Vue/TS/JS with `vue-i18n` / `i18next` and JSON locale
+files. See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ## Architecture
 

@@ -105,8 +105,14 @@ mod tests {
         let src = r#"{ "common": { "submit": "Submit", "cancel": "Cancel" } }"#;
         let e = entries(src);
         assert_eq!(e.len(), 2);
-        assert_eq!(e[0].key_path, vec!["common".to_string(), "submit".to_string()]);
-        assert_eq!(e[1].key_path, vec!["common".to_string(), "cancel".to_string()]);
+        assert_eq!(
+            e[0].key_path,
+            vec!["common".to_string(), "submit".to_string()]
+        );
+        assert_eq!(
+            e[1].key_path,
+            vec!["common".to_string(), "cancel".to_string()]
+        );
     }
 
     #[test]
@@ -137,7 +143,10 @@ mod tests {
         let src = r#"{"hello": "Hi"}"#;
         let e = entries(src);
         // The key `"hello"` (with quotes) spans bytes 1..8.
-        assert_eq!(&src[e[0].key_range.start.offset..e[0].key_range.end.offset], "\"hello\"");
+        assert_eq!(
+            &src[e[0].key_range.start.offset..e[0].key_range.end.offset],
+            "\"hello\""
+        );
         // And it must not overlap with the value range.
         assert!(e[0].key_range.end.offset <= e[0].range.start.offset);
     }

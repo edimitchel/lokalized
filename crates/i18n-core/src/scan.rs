@@ -190,7 +190,7 @@ fn is_excluded_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
-    DEFAULT_EXCLUDED_DIRS.iter().any(|d| *d == name)
+    DEFAULT_EXCLUDED_DIRS.contains(&name)
 }
 
 #[cfg(test)]
@@ -330,6 +330,6 @@ mod tests {
         let counts = idx.counts_by_key();
         assert_eq!(counts.get("a.x"), Some(&3));
         assert_eq!(counts.get("b.y"), Some(&1));
-        assert!(counts.get("missing").is_none());
+        assert!(!counts.contains_key("missing"));
     }
 }

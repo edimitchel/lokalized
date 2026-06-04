@@ -20,13 +20,13 @@ use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode,
 use tokio::sync::{mpsc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    CodeActionResponse, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-    CompletionResponse, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ExecuteCommandParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
     MessageType, OneOf, Position as LspPosition, Range as LspRange, ReferenceParams,
     ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
@@ -103,12 +103,7 @@ impl LanguageServer for Backend {
                 // wires up WorkspaceEdit-based actions.
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        "\"".into(),
-                        "'".into(),
-                        "`".into(),
-                        ".".into(),
-                    ]),
+                    trigger_characters: Some(vec!["\"".into(), "'".into(), "`".into(), ".".into()]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
@@ -151,9 +146,15 @@ impl LanguageServer for Backend {
         let usages_changed = self
             .maybe_update_usages(&doc.uri, &doc.language_id, &doc.text)
             .await;
+        let locale_changed = self.maybe_update_locale_index(&doc.uri, &doc.text).await;
         self.publish_diagnostics(&doc.uri).await;
         if usages_changed {
             self.republish_locale_diagnostics().await;
+        }
+        if locale_changed {
+            // A locale JSON moved → every open source doc may gain or lose
+            // `missing-key`/`missing-source` warnings; refresh them all.
+            self.republish_source_diagnostics().await;
         }
     }
 
@@ -170,15 +171,20 @@ impl LanguageServer for Backend {
             None
         };
 
-        let usages_changed = if let Some((text, lang)) = snapshot.as_ref() {
-            self.maybe_update_usages(&uri, lang, text).await
+        let (usages_changed, locale_changed) = if let Some((text, lang)) = snapshot.as_ref() {
+            let u = self.maybe_update_usages(&uri, lang, text).await;
+            let l = self.maybe_update_locale_index(&uri, text).await;
+            (u, l)
         } else {
-            false
+            (false, false)
         };
 
         self.publish_diagnostics(&uri).await;
         if usages_changed {
             self.republish_locale_diagnostics().await;
+        }
+        if locale_changed {
+            self.republish_source_diagnostics().await;
         }
     }
 
@@ -227,13 +233,8 @@ impl LanguageServer for Backend {
         // Locale JSON files get a `· N usages` hint after each key, fed by
         // the project-wide UsageIndex.
         if is_indexed_locale_uri(&self.index, &uri).await {
-            let hints = compute_locale_inlay_hints(
-                &self.documents,
-                &self.index,
-                &self.usages,
-                &uri,
-            )
-            .await;
+            let hints =
+                compute_locale_inlay_hints(&self.documents, &self.index, &self.usages, &uri).await;
             info!(uri = %uri, hints = hints.len(), "inlay_hint (locale)");
             return Ok(Some(hints));
         }
@@ -315,9 +316,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position.position;
         info!(%uri, line = pos.line, character = pos.character, "references request");
 
-        let Some(key) =
-            key_under_cursor(&self.documents, &self.index, &uri, pos).await
-        else {
+        let Some(key) = key_under_cursor(&self.documents, &self.index, &uri, pos).await else {
             info!("references: no key at cursor");
             return Ok(None);
         };
@@ -361,10 +360,7 @@ impl LanguageServer for Backend {
         Ok(Some(locations))
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri.clone();
         let pos = params.range.start;
         info!(%uri, line = pos.line, character = pos.character, "code_action request");
@@ -373,14 +369,9 @@ impl LanguageServer for Backend {
         // side actions below assume a translation-call usage at the cursor,
         // which never matches inside a JSON document.
         if is_indexed_locale_uri(&self.index, &uri).await {
-            let actions = build_locale_code_actions(
-                &self.documents,
-                &self.index,
-                &self.usages,
-                &uri,
-                pos,
-            )
-            .await;
+            let actions =
+                build_locale_code_actions(&self.documents, &self.index, &self.usages, &uri, pos)
+                    .await;
             return Ok(actions);
         }
 
@@ -419,10 +410,7 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn completion(
-        &self,
-        _params: CompletionParams,
-    ) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let index_guard = self.index.read().await;
         let Some(idx) = &*index_guard else {
             return Ok(None);
@@ -525,8 +513,14 @@ impl Backend {
     /// Recompute diagnostics for a single document (source or locale) and
     /// push them to the client.
     async fn publish_diagnostics(&self, uri: &Url) {
-        publish_diagnostics_for(&self.documents, &self.index, &self.usages, &self.client, uri)
-            .await;
+        publish_diagnostics_for(
+            &self.documents,
+            &self.index,
+            &self.usages,
+            &self.client,
+            uri,
+        )
+        .await;
     }
 
     /// Refresh the reverse [`UsageIndex`] for `uri` if it points at a
@@ -546,7 +540,10 @@ impl Backend {
         let Ok(path) = uri.to_file_path() else {
             return false;
         };
-        self.usages.write().await.update_file(path, text, language_id);
+        self.usages
+            .write()
+            .await
+            .update_file(path, text, language_id);
         true
     }
 
@@ -557,6 +554,52 @@ impl Backend {
         let uris: Vec<Url> = self.documents.read().await.keys().cloned().collect();
         for uri in uris {
             if is_indexed_locale_uri(&self.index, &uri).await {
+                self.publish_diagnostics(&uri).await;
+            }
+        }
+    }
+
+    /// Mirror of [`Self::maybe_update_usages`] for locale JSON buffers: if
+    /// `uri` is a known locale file, patch the in-memory [`LocaleIndex`]
+    /// from the live buffer so the very next source-side diagnostic run
+    /// sees the updated keyset.
+    ///
+    /// Parse errors are swallowed on purpose — the locale-file diagnostic
+    /// path already surfaces them, and we don't want a transient invalid
+    /// buffer to wipe out the previous index snapshot.
+    async fn maybe_update_locale_index(&self, uri: &Url, text: &str) -> bool {
+        if !is_indexed_locale_uri(&self.index, uri).await {
+            return false;
+        }
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        let mut guard = self.index.write().await;
+        let Some(idx) = guard.as_mut() else {
+            return false;
+        };
+        match idx.update_file_from_buffer(&path, text) {
+            Ok(changed) => {
+                if changed {
+                    info!(%uri, "locale index refreshed from buffer");
+                }
+                changed
+            }
+            Err(err) => {
+                warn!(%uri, error = %err, "locale buffer parse error, index left unchanged");
+                false
+            }
+        }
+    }
+
+    /// Re-publish diagnostics for every open source-code document. Called
+    /// after the [`LocaleIndex`] is patched so stale `missing-key` /
+    /// `missing-source` warnings clear immediately, without waiting for the
+    /// user to edit the source file.
+    async fn republish_source_diagnostics(&self) {
+        let uris: Vec<Url> = self.documents.read().await.keys().cloned().collect();
+        for uri in uris {
+            if !is_indexed_locale_uri(&self.index, &uri).await {
                 self.publish_diagnostics(&uri).await;
             }
         }
@@ -643,10 +686,7 @@ async fn compute_source_diagnostics(
                         "missing-source".into(),
                     )),
                     source: Some("lokalize".into()),
-                    message: format!(
-                        "Key `{}` is missing from source locale `{}`",
-                        u.key, source
-                    ),
+                    message: format!("Key `{}` is missing from source locale `{}`", u.key, source),
                     ..Default::default()
                 })
             } else {
@@ -733,6 +773,10 @@ async fn compute_locale_diagnostics(
     out
 }
 
+fn is_indexed_locale_path(idx: &LocaleIndex, path: &Path) -> bool {
+    idx.files.iter().any(|f| f.path == path)
+}
+
 async fn is_indexed_locale_uri(index: &IndexSlot, uri: &Url) -> bool {
     let Ok(path) = uri.to_file_path() else {
         return false;
@@ -740,8 +784,42 @@ async fn is_indexed_locale_uri(index: &IndexSlot, uri: &Url) -> bool {
     let guard = index.read().await;
     guard
         .as_ref()
-        .map(|idx| idx.files.iter().any(|f| f.path == path))
-        .unwrap_or(false)
+        .is_some_and(|idx| is_indexed_locale_path(idx, &path))
+}
+
+/// After a full index rebuild from disk, overlay every open locale buffer so
+/// unsaved edits stay visible to diagnostics and hover.
+async fn reapply_open_locale_buffers(documents: &DocumentStore, index_slot: &IndexSlot) {
+    let snapshots: Vec<(PathBuf, String)> = {
+        let docs = documents.read().await;
+        let guard = index_slot.read().await;
+        let Some(idx) = guard.as_ref() else {
+            return;
+        };
+        docs.iter()
+            .filter_map(|(uri, doc)| {
+                let path = uri.to_file_path().ok()?;
+                is_indexed_locale_path(idx, &path).then(|| (path, doc.text.clone()))
+            })
+            .collect()
+    };
+
+    let mut guard = index_slot.write().await;
+    let Some(idx) = guard.as_mut() else {
+        return;
+    };
+    for (path, text) in snapshots {
+        match idx.update_file_from_buffer(&path, &text) {
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to reapply open locale buffer after index rebuild"
+                );
+            }
+        }
+    }
 }
 
 // ---------- Helpers ----------
@@ -965,16 +1043,10 @@ fn format_hover_markdown(
 
     md.push_str("---\n**Open translation file:**\n\n");
     for (locale, val) in files {
-        let name = val
-            .file
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
+        let name = val.file.file_name().and_then(|s| s.to_str()).unwrap_or("?");
         let line = val.range.start.line + 1;
         match Url::from_file_path(&val.file) {
-            Ok(url) => md.push_str(&format!(
-                "- **{locale}** — [`{name}:{line}`]({url})\n",
-            )),
+            Ok(url) => md.push_str(&format!("- **{locale}** — [`{name}:{line}`]({url})\n",)),
             Err(_) => md.push_str(&format!("- **{locale}** — `{name}:{line}`\n")),
         }
     }
@@ -996,10 +1068,7 @@ fn format_hover_markdown(
 ///    If we can't figure out where to insert, skip that locale silently.
 /// 3. Apply `insert_key_json` to its current contents and wrap the result
 ///    in a `WorkspaceEdit` that replaces the whole file.
-async fn build_fill_missing_actions(
-    idx: &LocaleIndex,
-    key: &str,
-) -> Vec<CodeActionOrCommand> {
+async fn build_fill_missing_actions(idx: &LocaleIndex, key: &str) -> Vec<CodeActionOrCommand> {
     let values = idx.lookup(key);
     // Pick a reference value (source locale preferred, else any).
     let reference_value: String = values
@@ -1046,8 +1115,7 @@ async fn build_fill_missing_actions(
         };
 
         // Key path relative to the JSON root of the target file.
-        let path_segments =
-            key_path_in_file(key, target.namespace.as_deref(), layout, idx);
+        let path_segments = key_path_in_file(key, target.namespace.as_deref(), layout, idx);
         if path_segments.is_empty() {
             continue;
         }
@@ -1178,10 +1246,7 @@ fn range_contains_position(range: &i18n_core::Range, pos: LspPosition) -> bool {
 /// Example: looking up `global.zzzNewKey` will find any existing key under
 /// `global.*` (e.g. `global.numberOfDisplayedElements`) and return it so the
 /// caller can derive the target file from its path.
-fn find_reference_value<'a>(
-    idx: &'a LocaleIndex,
-    key: &str,
-) -> Option<&'a LocalizedValue> {
+fn find_reference_value<'a>(idx: &'a LocaleIndex, key: &str) -> Option<&'a LocalizedValue> {
     let segments: Vec<&str> = key.split('.').collect();
     for n in (1..segments.len()).rev() {
         for tree in idx.trees.values() {
@@ -1509,12 +1574,12 @@ async fn start_watcher(
                 let summary = index_summary(&index);
                 info!(root = %root.display(), "{summary} (reload)");
                 client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("Lokalize: {summary} (reload)"),
-                    )
+                    .log_message(MessageType::INFO, format!("Lokalize: {summary} (reload)"))
                     .await;
                 *index_slot.write().await = Some(index);
+                // Disk rebuild would stomp unsaved edits in open locale buffers;
+                // re-patch from the live document store before republishing.
+                reapply_open_locale_buffers(&documents, &index_slot).await;
                 republish_all_diagnostics(&documents, &index_slot, &usage_slot, &client).await;
                 // Inlay hints follow a pull model: the editor only re-fetches
                 // them when we ask it to. Without this, inlay hints keep
@@ -1564,8 +1629,8 @@ fn init_tracing() {
     // Also log to a file we can inspect outside Zed. Zed captures LSP stdout
     // (JSON-RPC) and ignores stderr, so a dedicated file is the most reliable
     // way to observe the server's internal state.
-    let log_path = std::env::var("LOKALIZE_LOG_FILE")
-        .unwrap_or_else(|_| "/tmp/lokalize-lsp.log".to_string());
+    let log_path =
+        std::env::var("LOKALIZE_LOG_FILE").unwrap_or_else(|_| "/tmp/lokalize-lsp.log".to_string());
 
     let file = std::fs::OpenOptions::new()
         .create(true)

@@ -91,9 +91,9 @@ lokalize-vue/
 
 ### Tests
 
-- [x] Tests unitaires : 14 tests (positions, Locale, JSON parser, KeyTree, diff)
+- [x] Tests unitaires : positions, Locale, JSON parser, KeyTree, framework, scan, mutation, display
 - [x] Tests d'intégration avec fixtures : `nested_project` + `flat_project` + erreur "no locales"
-- [x] **17 tests verts** sur `cargo test -p i18n-core`
+- [x] **78 tests verts** sur `cargo test -p i18n-core` (75 unit + 3 intégration)
 - [ ] Fixtures multi-framework supplémentaires (vue-i18n, Flutter ARB réel)
 
 ### Intégration LSP
@@ -112,7 +112,7 @@ lokalize-vue/
 - [x] Patterns reconnus : `$t/$tc/$rt/t/tc/i18n.t/keypath=/useTranslation`, `<Trans i18nKey>`, `formatMessage({id})`, `<FormattedMessage id>`
 - [x] Résolution du scope (ex. `useTranslation("forms") + t("submit")` → `forms.submit`)
 - [x] Dédup multi-framework (priorité au match avec scope résolu)
-- [x] 10 tests unitaires + **27 tests verts** (lib + intégration)
+- [x] Tests framework/scan couverts dans la suite `i18n-core` (voir ci-dessus)
 - [ ] Support custom framework via `.zed/i18n-ally-custom-framework.yml` (Phase 2.5)
 - [ ] Option robustesse : tree-sitter pour réduire les faux positifs dans commentaires/strings multi-lignes (Phase 2.5)
 
@@ -166,6 +166,14 @@ lokalize-vue/
 - [x] `did_open` / `did_change` (TextDocumentSyncKind::FULL) / `did_close`
 - [x] Helper `usage_at_position(doc, pos)` pour hover/definition
 - [x] Helper `LineIndex::offset_at(line, char)` pour position → byte offset
+- [x] **Live patch de `LocaleIndex` sur édition d'un JSON locale** :
+      `update_file_from_buffer(path, content)` re-parse le buffer, prune les
+      leaves du fichier dans le tree de la locale concernée, ré-insère les
+      nouvelles entries avec les mêmes règles de namespace que `IndexBuilder`.
+      Déclenche `republish_source_diagnostics` → les warnings `missing-key`
+      des fichiers source ouverts se mettent à jour sans attendre le watcher.
+      Erreurs de parse (JSON invalide pendant la frappe) sont tolérées :
+      l'index garde son état précédent.
 
 ### Perf
 
@@ -180,6 +188,7 @@ lokalize-vue/
 - [x] Filtre : seuls create/modify/remove sur `.json/.jsonc/.json5/.arb/.yml/.yaml`
 - [x] Bridge sync→async via `tokio::sync::mpsc`
 - [x] Debounce 300ms pour agréger les events en rafale
+- [x] Ré-application des buffers locale ouverts après rebuild disque (évite d'écraser les edits non sauvegardés)
 - [x] Rebuild complet de l'index + swap atomique
 - [x] `republish_diagnostics` pour chaque doc ouvert
 - [x] `client.inlay_hint_refresh()` pour invalider le cache inlay côté Zed
