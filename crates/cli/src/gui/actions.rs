@@ -43,7 +43,7 @@ pub fn rename_key_project(
     let mut files_touched = 0usize;
 
     for locale in snapshot.index.trees.keys() {
-        if snapshot.index.lookup(old_key).get(locale).is_none() {
+        if !snapshot.index.lookup(old_key).contains_key(locale) {
             continue;
         }
         let path = snapshot
@@ -69,7 +69,7 @@ pub fn delete_key_project(snapshot: &ProjectSnapshot, key: &str) -> anyhow::Resu
     let mut files_touched = 0usize;
 
     for locale in snapshot.index.trees.keys() {
-        if snapshot.index.lookup(key).get(locale).is_none() {
+        if !snapshot.index.lookup(key).contains_key(locale) {
             continue;
         }
         let path = snapshot
